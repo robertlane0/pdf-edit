@@ -184,7 +184,106 @@ const mainWorldInitScript = `
     }
   };
 
-  // 3. In-memory virtualization-safe overlay store
+  // 3. CSS round() math function polyfill / sanitizer for Chromium <125
+  function sanitizeCssValue(val) {
+    if (typeof val !== 'string' || !val.includes('round(')) return val;
+    let res = '';
+    let idx = 0;
+    while (true) {
+      const pos = val.indexOf('round(', idx);
+      if (pos === -1) {
+        res += val.slice(idx);
+        break;
+      }
+      res += val.slice(idx, pos);
+      let depth = 1;
+      let parts = [''];
+      let curPart = 0;
+      let endPos = -1;
+      for (let i = pos + 6; i < val.length; i++) {
+        const ch = val[i];
+        if (ch === '(') {
+          depth++;
+          parts[curPart] += ch;
+        } else if (ch === ')') {
+          depth--;
+          if (depth === 0) {
+            endPos = i;
+            break;
+          } else {
+            parts[curPart] += ch;
+          }
+        } else if (ch === ',' && depth === 1) {
+          curPart++;
+          parts[curPart] = '';
+        } else {
+          parts[curPart] += ch;
+        }
+      }
+      if (endPos !== -1 && parts.length >= 2) {
+        let expr = parts.length === 3 ? parts[1].trim() : parts[0].trim();
+        res += 'calc(' + expr + ')';
+        idx = endPos + 1;
+      } else {
+        res += val.slice(pos, pos + 6);
+        idx = pos + 6;
+      }
+    }
+    return res;
+  }
+
+  const origSetProperty = CSSStyleDeclaration.prototype.setProperty;
+  CSSStyleDeclaration.prototype.setProperty = function(property, value, priority) {
+    return origSetProperty.call(this, property, sanitizeCssValue(value), priority);
+  };
+
+  function wrapStyleGetter(proto) {
+    if (!proto) return;
+    const origDesc = Object.getOwnPropertyDescriptor(proto, 'style');
+    if (!origDesc || !origDesc.get) return;
+    const proxyMap = new WeakMap();
+    Object.defineProperty(proto, 'style', {
+      get: function() {
+        const realStyle = origDesc.get.call(this);
+        if (!realStyle) return realStyle;
+        let proxy = proxyMap.get(realStyle);
+        if (!proxy) {
+          proxy = new Proxy(realStyle, {
+            get(target, prop, receiver) {
+              const val = Reflect.get(target, prop, receiver);
+              if (typeof val === 'function') {
+                if (prop === 'setProperty') {
+                  return function(propertyName, value, priority) {
+                    return target.setProperty(propertyName, sanitizeCssValue(value), priority);
+                  };
+                }
+                return val.bind(target);
+              }
+              return val;
+            },
+            set(target, prop, value, receiver) {
+              const sanitized = sanitizeCssValue(value);
+              target[prop] = sanitized;
+              return true;
+            }
+          });
+          proxyMap.set(realStyle, proxy);
+        }
+        return proxy;
+      },
+      set: origDesc.set,
+      configurable: true,
+      enumerable: origDesc.enumerable
+    });
+  }
+
+  wrapStyleGetter(HTMLElement.prototype);
+  if (typeof SVGElement !== 'undefined') wrapStyleGetter(SVGElement.prototype);
+  if (typeof Element !== 'undefined' && Element.prototype !== HTMLElement.prototype) {
+    wrapStyleGetter(Element.prototype);
+  }
+
+  // 4. In-memory virtualization-safe overlay store
   const overlayStore = new Map();
 
   function initAppIntegration() {

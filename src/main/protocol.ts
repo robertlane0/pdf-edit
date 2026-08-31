@@ -68,6 +68,90 @@ export function resolveViewerPath(requestUrl: string): string | null {
 }
 
 /**
+ * Transforms modern CSS features (such as light-dark() from CSS Color Module Level 5)
+ * into standard CSS compatible with Chromium <123.
+ *
+ * For light-dark(L, D), the light value L is used for the default ruleset,
+ * and a corresponding @media (prefers-color-scheme: dark) override is appended.
+ */
+export function transformCssLightDark(cssContent: string): string {
+  let lightCss = '';
+  const darkRulesMap = new Map<string, Array<{ prop: string; darkVal: string }>>();
+
+  let pos = 0;
+  while (true) {
+    const start = cssContent.indexOf('light-dark(', pos);
+    if (start === -1) {
+      lightCss += cssContent.slice(pos);
+      break;
+    }
+    lightCss += cssContent.slice(pos, start);
+
+    let depth = 1;
+    let commaPos = -1;
+    let endPos = -1;
+    for (let i = start + 11; i < cssContent.length; i++) {
+      const ch = cssContent[i];
+      if (ch === '(') depth++;
+      else if (ch === ')') {
+        depth--;
+        if (depth === 0) {
+          endPos = i;
+          break;
+        }
+      } else if (ch === ',' && depth === 1 && commaPos === -1) {
+        commaPos = i;
+      }
+    }
+
+    if (endPos !== -1 && commaPos !== -1) {
+      const light = cssContent.substring(start + 11, commaPos).trim();
+      const dark = cssContent.substring(commaPos + 1, endPos).trim();
+
+      // Find property name and selector
+      const lastOpenBrace = cssContent.lastIndexOf('{', start);
+      const prevCloseBrace = cssContent.lastIndexOf('}', lastOpenBrace);
+      let selector = cssContent.substring(prevCloseBrace + 1, lastOpenBrace).trim();
+      // Remove any comments in selector
+      selector = selector.replace(/\/\*[\s\S]*?\*\//g, '').trim();
+
+      const lastColon = cssContent.lastIndexOf(':', start);
+      const lastSemicolon = cssContent.lastIndexOf(';', lastColon);
+      const propName = cssContent.substring(Math.max(lastSemicolon + 1, lastOpenBrace + 1), lastColon).trim();
+
+      if (selector && propName) {
+        if (!darkRulesMap.has(selector)) {
+          darkRulesMap.set(selector, []);
+        }
+        darkRulesMap.get(selector)!.push({ prop: propName, darkVal: dark });
+      }
+
+      lightCss += light;
+      pos = endPos + 1;
+    } else {
+      lightCss += cssContent.slice(start, start + 11);
+      pos = start + 11;
+    }
+  }
+
+  // Generate dark mode overrides
+  if (darkRulesMap.size > 0) {
+    let darkCss = '\n@media (prefers-color-scheme: dark) {\n';
+    for (const [selector, decls] of darkRulesMap.entries()) {
+      darkCss += `  ${selector} {\n`;
+      for (const { prop, darkVal } of decls) {
+        darkCss += `    ${prop}: ${darkVal};\n`;
+      }
+      darkCss += '  }\n';
+    }
+    darkCss += '}\n';
+    return lightCss + darkCss;
+  }
+
+  return lightCss;
+}
+
+/**
  * Must be called AFTER app.ready.
  * Handles app-viewer:// requests by serving files from dist/pdfjs/.
  *
@@ -80,6 +164,21 @@ export function registerViewerProtocol(ses?: Electron.Session) {
 
     if (!safePath) {
       return new Response('Forbidden', { status: 403 });
+    }
+
+    // For .css files, transform modern CSS features (e.g. light-dark) for Chromium compatibility
+    if (safePath.endsWith('.css')) {
+      try {
+        let content = await fs.promises.readFile(safePath, 'utf8');
+        content = transformCssLightDark(content);
+        return new Response(content, {
+          headers: {
+            'Content-Type': 'text/css; charset=utf-8'
+          }
+        });
+      } catch {
+        // Fallback to net.fetch
+      }
     }
 
     // For viewer.html, ensure style-src permits inline styles needed by PDF.js text layer & overlay
