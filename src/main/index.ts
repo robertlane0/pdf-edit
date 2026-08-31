@@ -1,12 +1,26 @@
 // src/main/index.ts
-import { app, BrowserWindow, session } from 'electron';
+import { app, BrowserWindow, ipcMain, session } from 'electron';
 import path from 'path';
 import { registerViewerScheme, registerViewerProtocol } from './protocol';
+import { applyTextEditsToPDF, type PDFTextEdit } from '../shared/text-editor';
 
 app.commandLine.appendSwitch('enable-features', 'BlinkExtension');
 
 // Must register custom scheme privileges BEFORE app is ready
 registerViewerScheme();
+
+ipcMain.handle(
+  'pdf:apply-text-edits',
+  async (_event, originalPdfBytes: Uint8Array, edits: PDFTextEdit[]): Promise<Uint8Array> => {
+    if (!(originalPdfBytes instanceof Uint8Array)) {
+      throw new TypeError('Expected source PDF bytes');
+    }
+    if (!Array.isArray(edits)) {
+      throw new TypeError('Expected text edits');
+    }
+    return applyTextEditsToPDF(originalPdfBytes, edits);
+  }
+);
 
 async function createWindow() {
   const pdfSession = session.fromPartition('persist:pdf-session');

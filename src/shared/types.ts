@@ -54,6 +54,16 @@ export interface PDFAnnotationRect extends PDFRect {
   color: NormalizedColor;
 }
 
+/** Serializable replacement for text that existed in the source PDF. */
+export interface PDFTextEdit extends PDFRect {
+  id: string;
+  pageIndex: number;
+  text: string;
+  fontSize: number;
+  fontStyle: 'normal' | 'bold' | 'italic' | 'boldItalic';
+  color: NormalizedColor;
+}
+
 /** Extension metadata returned by the extension loader */
 export interface ExtensionMetadata {
   id: string;
@@ -66,5 +76,6 @@ export const IPC_CHANNELS = {
   EXTENSION_LIST: 'extension:list',
   EXTENSION_SEND_MESSAGE: 'extension:send-message',
   PDF_GET_BYTES: 'pdf:get-bytes',
-  PDF_ADD_ANNOTATION: 'pdf:add-annotation'
+  PDF_ADD_ANNOTATION: 'pdf:add-annotation',
+  PDF_APPLY_TEXT_EDITS: 'pdf:apply-text-edits'
 } as const;

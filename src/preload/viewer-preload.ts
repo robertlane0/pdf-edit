@@ -1,5 +1,10 @@
 // src/preload/viewer-preload.ts
-import { webFrame } from 'electron';
+import { contextBridge, ipcRenderer, webFrame } from 'electron';
+
+contextBridge.exposeInMainWorld('__PDF_TEXT_EDITOR_IPC__', {
+  apply: (originalPdfBytes: Uint8Array, edits: unknown[]) =>
+    ipcRenderer.invoke('pdf:apply-text-edits', originalPdfBytes, edits),
+});
 
 /**
  * Polyfills for modern web standards (TC39 proposals / Baseline 2024-2025)
@@ -283,8 +288,290 @@ const mainWorldInitScript = `
     wrapStyleGetter(Element.prototype);
   }
 
-  // 4. In-memory virtualization-safe overlay store
+  // 4. In-memory virtualization-safe overlay stores
   const overlayStore = new Map();
+  const textEditStore = new Map();
+  let textEditMode = false;
+
+  function getTextEditLayer(pageView) {
+    let layer = pageView.div.querySelector('.ext-text-edit-layer');
+    if (!layer) {
+      layer = document.createElement('div');
+      layer.className = 'ext-text-edit-layer';
+      layer.style.cssText = 'position:absolute; inset:0; z-index:30; pointer-events:none;';
+      pageView.div.appendChild(layer);
+    }
+    // The layer must not catch page clicks: before a text run has been edited,
+    // the actual PDF.js text layer is the only target that identifies it.
+    layer.style.pointerEvents = 'none';
+    return layer;
+  }
+
+  function cssColorToRgb(value) {
+    const matches = String(value).match(/\d+(?:\.\d+)?/g);
+    if (!matches || matches.length < 3) return { r: 0, g: 0, b: 0 };
+    return {
+      r: Math.min(255, Number(matches[0])) / 255,
+      g: Math.min(255, Number(matches[1])) / 255,
+      b: Math.min(255, Number(matches[2])) / 255,
+    };
+  }
+
+  function getFontStyle(style) {
+    const bold = Number(style.fontWeight) >= 600 || /bold/i.test(style.fontWeight);
+    const italic = /italic|oblique/i.test(style.fontStyle);
+    if (bold && italic) return 'boldItalic';
+    if (bold) return 'bold';
+    if (italic) return 'italic';
+    return 'normal';
+  }
+
+  function getDomBounds(edit, viewport) {
+    const first = viewport.convertToViewportPoint(edit.x, edit.y);
+    const second = viewport.convertToViewportPoint(edit.x + edit.width, edit.y + edit.height);
+    return {
+      left: Math.min(first[0], second[0]),
+      top: Math.min(first[1], second[1]),
+      width: Math.abs(second[0] - first[0]),
+      height: Math.abs(second[1] - first[1]),
+    };
+  }
+
+  function renderTextEdits(pageNumber, pageView) {
+    const layer = getTextEditLayer(pageView);
+    layer.replaceChildren();
+    for (const edit of textEditStore.values()) {
+      if (edit.pageIndex !== pageNumber) continue;
+      const bounds = getDomBounds(edit, pageView.viewport);
+      const item = document.createElement('div');
+      item.dataset.pdfTextEditId = edit.id;
+      item.textContent = edit.text;
+      item.title = textEditMode ? 'Edit text' : '';
+      item.style.cssText = [
+        'position:absolute',
+        'box-sizing:border-box',
+        'overflow:visible',
+        'white-space:pre',
+        'background:#fff',
+        'border:0',
+        'padding:0',
+        'margin:0',
+        'line-height:1',
+        'cursor:' + (textEditMode ? 'text' : 'default'),
+        'pointer-events:' + (textEditMode ? 'auto' : 'none'),
+        'left:' + bounds.left + 'px',
+        'top:' + bounds.top + 'px',
+        'width:' + Math.max(1, bounds.width) + 'px',
+        'min-height:' + Math.max(1, bounds.height) + 'px',
+        'font-family:' + edit.fontFamily,
+        'font-size:' + (edit.fontSize * pageView.viewport.scale) + 'px',
+        'font-weight:' + edit.fontWeight,
+        'font-style:' + edit.fontCssStyle,
+        'color:rgb(' + Math.round(edit.color.r * 255) + ',' + Math.round(edit.color.g * 255) + ',' + Math.round(edit.color.b * 255) + ')',
+      ].join(';');
+      layer.appendChild(item);
+    }
+  }
+
+  function renderAllTextEdits(App) {
+    for (let index = 0; index < App.pdfViewer.pagesCount; index++) {
+      const pageView = App.pdfViewer.getPageView(index);
+      if (pageView && pageView.div) renderTextEdits(index + 1, pageView);
+    }
+  }
+
+  function findPageView(App, element) {
+    const page = element.closest('.page');
+    if (!page) return null;
+    for (let index = 0; index < App.pdfViewer.pagesCount; index++) {
+      const pageView = App.pdfViewer.getPageView(index);
+      if (pageView && pageView.div === page) return { pageView, pageNumber: index + 1 };
+    }
+    return null;
+  }
+
+  function editForTextLayerSpan(span, pageNumber, pageView) {
+    const pageBounds = pageView.div.getBoundingClientRect();
+    const bounds = span.getBoundingClientRect();
+    const left = bounds.left - pageBounds.left;
+    const top = bounds.top - pageBounds.top;
+    const right = left + bounds.width;
+    const bottom = top + bounds.height;
+    const first = pageView.viewport.convertToPdfPoint(left, top);
+    const second = pageView.viewport.convertToPdfPoint(right, bottom);
+    const style = getComputedStyle(span);
+    const height = Math.abs(second[1] - first[1]);
+    const cssFontSize = Number.parseFloat(style.fontSize);
+    return {
+      id: 'text-' + Date.now() + '-' + Math.random().toString(36).slice(2),
+      pageIndex: pageNumber,
+      text: span.textContent || '',
+      x: Math.min(first[0], second[0]),
+      y: Math.min(first[1], second[1]),
+      width: Math.abs(second[0] - first[0]),
+      height,
+      fontSize: Number.isFinite(cssFontSize) ? cssFontSize / pageView.viewport.scale : height * 0.8,
+      fontStyle: getFontStyle(style),
+      fontFamily: style.fontFamily || 'sans-serif',
+      fontWeight: style.fontWeight || 'normal',
+      fontCssStyle: style.fontStyle || 'normal',
+      color: cssColorToRgb(style.color),
+    };
+  }
+
+  function openTextEditor(App, edit, isNew) {
+    const pageView = App.pdfViewer.getPageView(edit.pageIndex - 1);
+    if (!pageView) return;
+    const layer = getTextEditLayer(pageView);
+    renderTextEdits(edit.pageIndex, pageView);
+    const display = layer.querySelector('[data-pdf-text-edit-id="' + edit.id + '"]');
+    if (display) display.remove();
+
+    const bounds = getDomBounds(edit, pageView.viewport);
+    const input = document.createElement('textarea');
+    input.value = edit.text;
+    input.setAttribute('aria-label', 'Edit PDF text');
+    input.dataset.pdfTextEditor = edit.id;
+    input.style.cssText = [
+      'position:absolute',
+      'box-sizing:border-box',
+      'resize:both',
+      'z-index:1',
+      'left:' + bounds.left + 'px',
+      'top:' + bounds.top + 'px',
+      'width:' + Math.max(24, bounds.width + 8) + 'px',
+      'min-height:' + Math.max(22, bounds.height + 6) + 'px',
+      'padding:1px 3px',
+      'border:1px solid #0b57d0',
+      'outline:0',
+      'background:#fff',
+      'line-height:1.1',
+      'font-family:' + edit.fontFamily,
+      'font-size:' + (edit.fontSize * pageView.viewport.scale) + 'px',
+      'font-weight:' + edit.fontWeight,
+      'font-style:' + edit.fontCssStyle,
+      'color:rgb(' + Math.round(edit.color.r * 255) + ',' + Math.round(edit.color.g * 255) + ',' + Math.round(edit.color.b * 255) + ')',
+    ].join(';');
+
+    let finished = false;
+    const finish = (commit) => {
+      if (finished) return;
+      finished = true;
+      if (commit && input.value) {
+        edit.text = input.value;
+        textEditStore.set(edit.id, edit);
+      } else if (isNew) {
+        textEditStore.delete(edit.id);
+      }
+      renderTextEdits(edit.pageIndex, pageView);
+    };
+    input.addEventListener('blur', () => finish(true));
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        finish(false);
+      } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        finish(true);
+      }
+    });
+    layer.appendChild(input);
+    requestAnimationFrame(() => {
+      input.focus();
+      input.select();
+    });
+  }
+
+  async function exportTextEdits(App) {
+    if (textEditStore.size === 0) return;
+    const source = await App.pdfDocument.getData();
+    const edited = await window.__PDF_TEXT_EDITOR_IPC__.apply(source, Array.from(textEditStore.values()));
+    const blob = new Blob([edited], { type: 'application/pdf' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'edited.pdf';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function installTextEditor(App) {
+    if (document.getElementById('ext-text-edit-mode')) return;
+    const separator = document.getElementById('editorModeSeparator');
+    if (!separator || !separator.parentElement) return;
+
+    const style = document.createElement('style');
+    style.id = 'ext-text-editor-styles';
+    style.textContent = [
+      '#ext-text-edit-mode::before { -webkit-mask-image:url(images/editor-toolbar-edit.svg); mask-image:url(images/editor-toolbar-edit.svg); }',
+      '#ext-text-edit-export::before { -webkit-mask-image:url(images/toolbarButton-download.svg); mask-image:url(images/toolbarButton-download.svg); }',
+      '#viewerContainer.ext-text-editing .textLayer span { cursor:text !important; }',
+      '.ext-text-edit-layer textarea { pointer-events:auto; }',
+    ].join('\\n');
+    document.head.appendChild(style);
+
+    const container = document.createElement('div');
+    container.id = 'ext-text-edit-buttons';
+    container.className = 'toolbarHorizontalGroup';
+
+    const createButton = (id, label) => {
+      const button = document.createElement('button');
+      button.id = id;
+      button.type = 'button';
+      button.className = 'toolbarButton';
+      button.title = label;
+      button.setAttribute('aria-label', label);
+      const accessibleLabel = document.createElement('span');
+      accessibleLabel.textContent = label;
+      button.appendChild(accessibleLabel);
+      return button;
+    };
+
+    const modeButton = createButton('ext-text-edit-mode', 'Edit existing PDF text');
+    modeButton.addEventListener('click', () => {
+      textEditMode = !textEditMode;
+      modeButton.classList.toggle('toggled', textEditMode);
+      modeButton.setAttribute('aria-pressed', String(textEditMode));
+      document.getElementById('viewerContainer')?.classList.toggle('ext-text-editing', textEditMode);
+      renderAllTextEdits(App);
+    });
+    container.appendChild(modeButton);
+
+    const exportButton = createButton('ext-text-edit-export', 'Export PDF with text edits');
+    exportButton.addEventListener('click', async () => {
+      try {
+        await exportTextEdits(App);
+      } catch (error) {
+        console.error('Unable to export text edits', error);
+      }
+    });
+    container.appendChild(exportButton);
+    separator.parentElement.insertBefore(container, separator);
+
+    document.addEventListener('click', (event) => {
+      if (!textEditMode) return;
+      const target = event.target;
+      if (!(target instanceof Element) || target.closest('textarea')) return;
+      const existing = target.closest('[data-pdf-text-edit-id]');
+      if (existing) {
+        event.preventDefault();
+        event.stopPropagation();
+        const edit = textEditStore.get(existing.dataset.pdfTextEditId);
+        if (edit) openTextEditor(App, edit, false);
+        return;
+      }
+      const span = target.closest('.textLayer span');
+      if (!span) return;
+      const located = findPageView(App, span);
+      if (!located) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const edit = editForTextLayerSpan(span, located.pageNumber, located.pageView);
+      if (!edit.text.trim()) return;
+      textEditStore.set(edit.id, edit);
+      openTextEditor(App, edit, true);
+    }, true);
+  }
 
   function initAppIntegration() {
     const App = window.PDFViewerApplication;
@@ -317,6 +604,8 @@ const mainWorldInitScript = `
           });
         }
 
+        renderTextEdits(pageIndex, pageView);
+
         window.postMessage({
           type: 'PDF_PAGE_RENDERED',
           payload: {
@@ -326,6 +615,7 @@ const mainWorldInitScript = `
           }
         }, '*');
       });
+      installTextEditor(App);
     });
   }
 
