@@ -58,10 +58,8 @@ export interface PDFAnnotationRect extends PDFRect {
 export interface PDFTextEdit extends PDFRect {
   id: string;
   pageIndex: number;
+  sourceText: string;
   text: string;
-  fontSize: number;
-  fontStyle: 'normal' | 'bold' | 'italic' | 'boldItalic';
-  color: NormalizedColor;
 }
 
 /** Extension metadata returned by the extension loader */

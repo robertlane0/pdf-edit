@@ -405,6 +405,7 @@ const mainWorldInitScript = `
     return {
       id: 'text-' + Date.now() + '-' + Math.random().toString(36).slice(2),
       pageIndex: pageNumber,
+      sourceText: span.textContent || '',
       text: span.textContent || '',
       x: Math.min(first[0], second[0]),
       y: Math.min(first[1], second[1]),
@@ -457,7 +458,7 @@ const mainWorldInitScript = `
     const finish = (commit) => {
       if (finished) return;
       finished = true;
-      if (commit && input.value) {
+      if (commit) {
         edit.text = input.value;
         textEditStore.set(edit.id, edit);
       } else if (isNew) {

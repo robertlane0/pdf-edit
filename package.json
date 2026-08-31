@@ -6,7 +6,8 @@
     "build:pdfjs": "node scripts/build-pdfjs.js",
     "build:ts": "tsc",
     "build": "npm run build:pdfjs && npm run build:ts",
-    "start": "electron ."
+    "start": "electron .",
+    "verify:text-edit": "npm run build && node scripts/verify-text-edit.js"
   },
   "dependencies": {
     "fs-extra": "^11.2.0",
