@@ -56,8 +56,9 @@ export function resolveViewerPath(requestUrl: string): string | null {
     relativePath = decodeURIComponent(relativePath);
     const safePath = path.normalize(path.join(PDFJS_ROOT, relativePath));
 
-    // Security check: ensure path does not escape PDFJS_ROOT
-    if (!safePath.startsWith(PDFJS_ROOT)) {
+    // Security check: ensure path does not escape PDFJS_ROOT (anchored on path separator)
+    const normalizedRoot = PDFJS_ROOT.endsWith(path.sep) ? PDFJS_ROOT : PDFJS_ROOT + path.sep;
+    if (safePath !== PDFJS_ROOT && !safePath.startsWith(normalizedRoot)) {
       return null;
     }
 

@@ -105,7 +105,6 @@ grep -rniE "api[_-]?key|secret|password|token\s*=" src --include="*.ts"
 
 | ID | Title | Category | Severity | Priority | Est. Effort |
 |---|---|---|---|---|---|
-| [SEC-3](#sec-3-path-traversal-guard-in-the-custom-protocol-handler-uses-an-unanchored-prefix-check) | Path-traversal guard uses unanchored prefix check | Security | Medium | Short-term | Low |
 | [SEC-4](#sec-4-runtime-csp-weakening-via-regex-injected-unsafe-inline) | Runtime CSP weakening injects `'unsafe-inline'` | Security | Medium | Short-term | Low |
 | [SEC-5](#sec-5-postmessage-listeners-accept-messages-from-any-origin) | `postMessage` used with no origin validation | Security | Low–Medium | Short-term | Low |
 | [SEC-6](#sec-6-eval-based-polyfill-injection-and-unscoped-prototype-patching) | `eval()`-based polyfill injection + global prototype patching | Security | Medium | Medium-term | Medium |
@@ -131,63 +130,6 @@ grep -rniE "api[_-]?key|secret|password|token\s*=" src --include="*.ts"
 ## 5. Detailed Findings
 
 ### 5.1 Security
-
-#### SEC-3: Path-traversal guard in the custom protocol handler uses an unanchored prefix check
-
-**Severity:** Medium &nbsp;|&nbsp; **Category:** Security &nbsp;|&nbsp; **Priority:** Short-term
-
-**Evidence**
-
-`src/main/protocol.ts:56-64`:
-
-```ts
-relativePath = decodeURIComponent(relativePath);
-const safePath = path.normalize(path.join(PDFJS_ROOT, relativePath));
-
-// Security check: ensure path does not escape PDFJS_ROOT
-if (!safePath.startsWith(PDFJS_ROOT)) {
-  return null;
-}
-```
-
-**Root cause**
-
-`String.prototype.startsWith(PDFJS_ROOT)` is a classic incomplete containment check (CWE-22 adjacent): it treats `PDFJS_ROOT` as a raw string prefix rather than a path-segment boundary. If a sibling directory ever exists whose name shares `PDFJS_ROOT` as a literal prefix (e.g., `dist/pdfjs-legacy/`, `dist/pdfjs.bak/`), a crafted request such as `app-viewer://web/../pdfjs-legacy/secret.txt` would resolve to a path that passes this check even though it is outside the intended `dist/pdfjs` directory. There is currently no such sibling directory in this repository, so the check is **not exploitable today**, but it is a latent, silent trap for the next feature that adds a `dist/pdfjs*`-prefixed directory.
-
-**Recommended fix**
-
-Anchor the check on a path separator boundary, e.g.:
-
-```ts
-const normalizedRoot = PDFJS_ROOT.endsWith(path.sep) ? PDFJS_ROOT : PDFJS_ROOT + path.sep;
-if (safePath !== PDFJS_ROOT && !safePath.startsWith(normalizedRoot)) {
-  return null;
-}
-```
-
-or use Node's `path.relative(PDFJS_ROOT, safePath)` and reject if the result starts with `..` or is absolute.
-
-**Implementation steps**
-
-1. Replace the `startsWith` check in `resolveViewerPath` (`src/main/protocol.ts`) with the separator-anchored version above.
-2. Add unit tests (see below) that assert the function returns `null` for traversal attempts and same-prefix sibling-directory attempts specifically.
-
-**Tests to add**
-
-- Unit tests for `resolveViewerPath` covering: legitimate `web/viewer.html` and `build/pdf.mjs` paths (should resolve); `../../../etc/passwd`-style traversal (should return `null`); a synthetic sibling-prefix case such as mocking `PDFJS_ROOT` as `/app/dist/pdfjs` and requesting a path that normalizes to `/app/dist/pdfjs-evil/x` (should return `null` — this is the regression test that would have caught the current bug pattern).
-
-**Validation steps**
-
-- Run the new unit tests; confirm all pass.
-- Manually request `app-viewer://web/../../../../etc/hostname` from the running app (e.g., via `fetch()` in devtools) and confirm a 403 response.
-
-**Risks**
-
-- Very low; this is a narrow, well-contained fix with no behavioral impact on legitimate requests.
-
-**Estimated effort:** Low (under half a day including tests).
-
----
 
 #### SEC-4: Runtime CSP weakening via regex-injected `'unsafe-inline'`
 
@@ -555,7 +497,7 @@ Introduce a lightweight, fast unit-test framework (`node:test` — built into No
 
 1. Add `"test": "node --test dist/**/*.test.js"` (or the `vitest` equivalent) to `package.json` scripts.
 2. Write unit tests for, at minimum: `tokenize` (literal strings incl. escapes/nesting, hex strings incl. odd-length padding, numbers, arrays, comments), `decodeLiteralString`/`encodeLiteralString` round-trips, `decodeHexString`/`encodeHexString` round-trips, `findTextGroups` (single `Tj` operand, `TJ` array with kerning numbers interspersed), `getApproximateTextOrigin` (`Tm` vs `Td`/`TD` extraction), and `applyReplacementToBytes` end-to-end against small synthetic content-stream byte arrays (not full PDF files) for deletion, substitution, and multi-token-span replacement scenarios.
-3. Add tests for `resolveViewerPath` ([SEC-3](#sec-3-path-traversal-guard-in-the-custom-protocol-handler-uses-an-unanchored-prefix-check)) and `transformCssLightDark` (`src/main/protocol.ts`) — both are pure, easily testable functions with no coverage today.
+3. Add tests for `resolveViewerPath` and `transformCssLightDark` (`src/main/protocol.ts`) — both are pure, easily testable functions with no coverage today.
 4. Wire the new `test` script into CI ([TEST-3](#test-3-no-continuous-integration-configured)).
 
 **Tests to add**
@@ -1144,7 +1086,6 @@ Grouped by suggested timeframe. Items within a group are roughly ordered by leve
 
 | ID | Action |
 |---|---|
-| [SEC-3](#sec-3-path-traversal-guard-in-the-custom-protocol-handler-uses-an-unanchored-prefix-check) | Fix the unanchored path-traversal check in `resolveViewerPath` |
 | [SEC-4](#sec-4-runtime-csp-weakening-via-regex-injected-unsafe-inline) | Scope/harden the CSP `unsafe-inline` rewrite |
 | [SEC-5](#sec-5-postmessage-listeners-accept-messages-from-any-origin) | Add origin validation to `postMessage` usage |
 | [SEC-7](#sec-7-no-runtime-validation-of-ipc-payloads-crossing-the-trust-boundary) | Add runtime schema validation to the `pdf:apply-text-edits` IPC handler |
