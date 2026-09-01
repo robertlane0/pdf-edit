@@ -34,12 +34,12 @@
 
 The application is functional at a basic level (it type-checks cleanly with `strict` TypeScript and has no build errors), but it carries **real risk in four areas**:
 
-- **Security posture is weaker than the codebase's own stated threat model.** The app explicitly serves untrusted, user-supplied PDF files, yet it pins Electron 29.4.6 (15 major versions behind current, with 30+ known high-severity CVEs including a context-isolation bypass) and explicitly disables Chromium's renderer sandbox (`sandbox: false`) — the opposite of Electron's hardened defaults for an app that parses attacker-controllable input.
+- **Security posture is weaker than the codebase's own stated threat model.** The app explicitly serves untrusted, user-supplied PDF files, yet it explicitly disables Chromium's renderer sandbox (`sandbox: false`) — the opposite of Electron's hardened defaults for an app that parses attacker-controllable input.
 - **The core "edit PDF text in place" feature has a correctness gap that isn't exercised by any test.** Replacement text is spliced into the content stream as raw Latin‑1 bytes with no awareness of the page's actual font encoding. This works for ASCII deletions/substitutions against simple fonts, but will silently corrupt or throw for the very common case of subsetted/CID-embedded fonts and non‑Latin‑1 characters — which is most PDFs produced by modern authoring tools.
 - **There is no automated testing or CI.** The three "verification" scripts in `scripts/` are manual, GUI-dependent smoke tests that require files and binaries that don't exist in the repository, and two of the three aren't even wired into `npm scripts`. The single most complex and highest-risk file in the repo (`pdf-text-content.ts`, a hand-rolled PDF content-stream tokenizer) has zero unit tests.
 - **Roughly a third of `src/` is dead code.** Five of twelve TypeScript modules (`extensions.ts`, `event-bus.ts`, `overlay-manager.ts`, `viewport-math.ts`, `chrome-pdf-editor.ts`, plus the unused `pdf-merger.ts` and `types.ts`) are never imported by the application's actual entry points. The real, working logic was instead written inline as a large `eval`'d string inside `viewer-preload.ts`, duplicating logic that exists — better-typed — in the unused modules.
 
-None of these issues currently block the app from running, but together they represent significant risk for a project that (a) processes untrusted files by design and (b) has no safety net (tests/CI) to catch regressions as it grows. This report catalogs **22 detailed findings** plus a set of minor observations, each with evidence, root cause, a concrete fix, and effort/risk estimates, and closes with a prioritized remediation roadmap.
+None of these issues currently block the app from running, but together they represent significant risk for a project that (a) processes untrusted files by design and (b) has no safety net (tests/CI) to catch regressions as it grows. This report catalogs **21 detailed findings** plus a set of minor observations, each with evidence, root cause, a concrete fix, and effort/risk estimates, and closes with a prioritized remediation roadmap.
 
 ---
 
@@ -106,7 +106,6 @@ grep -rniE "api[_-]?key|secret|password|token\s*=" src --include="*.ts"
 
 | ID | Title | Category | Severity | Priority | Est. Effort |
 |---|---|---|---|---|---|
-| [SEC-1](#sec-1-electron-dependency-is-15-major-versions-behind-with-30-known-high-severity-cves) | Electron pinned to v29 — 30+ known high-severity CVEs | Security | **High** | Immediate | Medium |
 | [SEC-2](#sec-2-renderer-sandbox-explicitly-disabled-while-processing-untrusted-pdfs) | Renderer sandbox explicitly disabled for untrusted PDF input | Security | **High** | Immediate | Medium |
 | [SEC-3](#sec-3-path-traversal-guard-in-the-custom-protocol-handler-uses-an-unanchored-prefix-check) | Path-traversal guard uses unanchored prefix check | Security | Medium | Short-term | Low |
 | [SEC-4](#sec-4-runtime-csp-weakening-via-regex-injected-unsafe-inline) | Runtime CSP weakening injects `'unsafe-inline'` | Security | Medium | Short-term | Low |
@@ -134,69 +133,6 @@ grep -rniE "api[_-]?key|secret|password|token\s*=" src --include="*.ts"
 ## 5. Detailed Findings
 
 ### 5.1 Security
-
-#### SEC-1: Electron dependency is 15 major versions behind, with 30+ known high-severity CVEs
-
-**Severity:** High &nbsp;|&nbsp; **Category:** Security &nbsp;|&nbsp; **Priority:** Immediate
-
-**Evidence**
-
-`package.json:19` pins `"electron": "^29.0.0"`; the installed resolved version is `29.4.6`. `npm audit` against the installed lockfile reports:
-
-```
-electron  <=40.10.2 || 41.0.0-alpha.1 - 41.7.1 || 42.0.0-alpha.1 - 42.3.3 || ...
-Severity: high
-... 30 advisories, including:
-Electron: Context isolation bypass via Function.prototype.bind hijack — GHSA-h7rp-cf8h-j98x
-Electron: contextBridge object copy honors prototype setters — GHSA-ff2p-hmqr-hxm4
-Electron: ASAR Integrity Bypass via resource modification — GHSA-vmqv-hx8q-j7mg
-
-extract-zip  *
-Severity: high
-extract-zip unvalidated symlink path traversal — GHSA-jmr9-qjv8-65gv
-
-2 high severity vulnerabilities
-```
-
-`npm view electron version` reports the current published release is **44.1.0** — this app is pinned to a release line that is over 5 major versions and roughly 3+ years of security patches behind current.
-
-**Root cause**
-
-The dependency was pinned once at project inception (per `AGENTS.md`'s dependency spec) and never revisited; there is no automated update mechanism (see [DEP-1](#dep-1-no-automated-dependency-update-or-audit-gate)) to surface drift.
-
-**Why it matters here specifically:** this application's entire purpose is to open and render PDF files supplied by the end user — i.e., attacker-controllable input is a first-class, expected input to the renderer process. Two of the specific advisories above (context-isolation bypass, contextBridge prototype-setter issue) directly undermine the exact security boundary (`contextIsolation: true` + `contextBridge`) this app relies on to keep the preload/renderer split safe.
-
-**Recommended fix**
-
-Upgrade to the latest Electron LTS-equivalent release (currently 44.x), re-test the app end-to-end (custom protocol handler, contextBridge APIs, `webFrame.executeJavaScript`, and PDF.js compatibility all changed non-trivially across 15 majors), and add a recurring dependency-audit gate so this doesn't recur.
-
-**Implementation steps**
-
-1. Create a branch and bump `electron` incrementally through major LTS-adjacent milestones (e.g., 29 → 32 → 35 → 38 → 44) rather than a single 15-major jump, running `npx tsc --noEmit` and the smoke scripts at each step to isolate breakage.
-2. Re-validate `protocol.registerSchemesAsPrivileged` / `protocol.handle` usage in `src/main/protocol.ts` — the `protocol.handle` API stabilized after v29 and has had behavior refinements since.
-3. Re-check whether the CSS `light-dark()` and `round()` workarounds in `viewer-preload.ts` (lines ~14–160) are still necessary — modern Chromium (bundled with Electron 44) has native support for both, so most of that polyfill code likely becomes dead weight post-upgrade (cross-reference [ARCH-1](#arch-1-a-third-of-src-is-dead-code-the-specced-architecture-was-abandoned)).
-4. Re-run `npm audit` after the bump and confirm 0 high/critical advisories remain.
-5. Update `@types/node` and `typescript` to versions compatible with the new Electron/Node ABI if needed.
-
-**Tests to add**
-
-- An automated check (script or CI step) that fails the build if `npm audit --audit-level=high` reports any findings.
-- Regression coverage for the custom protocol handler (see [TEST-1](#test-1-zero-unit-test-coverage-for-the-riskiest-code-in-the-repository)) to catch behavioral drift in `protocol.handle` across the version bump.
-
-**Validation steps**
-
-- `npm audit` shows 0 high/critical vulnerabilities.
-- `npm start` launches, loads `app-viewer://web/viewer.html`, and the existing manual verify scripts pass (`verify-electron.js`, `verify-full-lifecycle.js`, `verify-text-edit.js`) after being pointed at `dist/` built with the new Electron.
-- Manual smoke test: open a real-world PDF (not just the PDF.js sample), edit and export text, confirm output opens correctly in another viewer.
-
-**Risks**
-
-- Electron API changes between v29 and v44 (particularly around `protocol.handle`, session partitioning, and sandboxed preload capabilities) may require code changes beyond a version bump alone.
-- The MV3 extension-loading flag (`enable-features: BlinkExtension`) used in `src/main/index.ts:7` is an internal/experimental Chromium flag; its behavior and availability may have changed or been removed across this many versions and should be explicitly re-verified.
-
-**Estimated effort:** Medium (2–4 days including staged bumps, regression testing, and fixing any breaking API changes).
-
----
 
 #### SEC-2: Renderer sandbox explicitly disabled while processing untrusted PDFs
 
@@ -460,13 +396,13 @@ The injected script also globally monkey-patches built-in prototypes for the lif
 **Recommended fix**
 
 - Replace `eval()`/`executeJavaScript(string)` with a real, separately compiled/bundled script file injected via a `<script>` tag or `session.setPreloads`, so the code is type-checked, lintable, and testable like the rest of the codebase.
-- Feature-detect and apply polyfills only where genuinely needed rather than unconditionally patching prototypes app-wide; once [SEC-1](#sec-1-electron-dependency-is-15-major-versions-behind-with-30-known-high-severity-cves)'s Electron upgrade lands, re-audit which of these polyfills are still required at all (modern Chromium natively supports most of the listed TC39 features).
+- Feature-detect and apply polyfills only where genuinely needed rather than unconditionally patching prototypes app-wide; once the Electron upgrade lands, re-audit which of these polyfills are still required at all (modern Chromium natively supports most of the listed TC39 features).
 
 **Implementation steps**
 
 1. Extract the polyfill source and the main-world integration logic (currently inline strings in `viewer-preload.ts`) into standalone `.ts` files under `src/renderer/` (reusing/replacing the already-written-but-unused `overlay-manager.ts`, `event-bus.ts`, `viewport-math.ts`, and `chrome-pdf-editor.ts` where they overlap — see [ARCH-1](#arch-1-a-third-of-src-is-dead-code-the-specced-architecture-was-abandoned)).
 2. Compile them normally with `tsc` and load the compiled output via a `<script>` injected by the preload (or `session.setPreloads` for an additional preload target), instead of `eval`.
-3. After the Electron upgrade ([SEC-1](#sec-1-electron-dependency-is-15-major-versions-behind-with-30-known-high-severity-cves)), remove any polyfills that are natively supported by the new bundled Chromium version.
+3. After the Electron upgrade, remove any polyfills that are natively supported by the new bundled Chromium version.
 4. Scope any remaining prototype patches with feature-detection guards that are already present (`if (typeof X !== 'function')`) but document *why* each is still needed with a version/compat comment.
 
 **Tests to add**
@@ -850,7 +786,7 @@ Same as [DOC-1](#doc-1-no-readme-or-contributor-facing-documentation) — these 
 
 - `CONTRIBUTING.md`: coding conventions (once [ARCH-3](#arch-3-no-linting-or-formatting-tooling-configured) establishes them), how to run tests/CI locally, PR expectations.
 - `CHANGELOG.md`: start tracking user-visible changes going forward (the git log's commit messages are agent/tooling-oriented, not a substitute for a curated changelog).
-- `SECURITY.md`: given this app processes untrusted PDF files and has a real attack surface ([SEC-1](#sec-1-electron-dependency-is-15-major-versions-behind-with-30-known-high-severity-cves), [SEC-2](#sec-2-renderer-sandbox-explicitly-disabled-while-processing-untrusted-pdfs)), a documented process for reporting security issues is particularly relevant here, not just boilerplate.
+- `SECURITY.md`: given this app processes untrusted PDF files and has a real attack surface ([SEC-2](#sec-2-renderer-sandbox-explicitly-disabled-while-processing-untrusted-pdfs)), a documented process for reporting security issues is particularly relevant here, not just boilerplate.
 
 **Implementation steps**
 
@@ -890,7 +826,7 @@ electron       29.4.6    29.4.6  44.1.0  node_modules/electron
 typescript      5.9.3     5.9.3   7.0.2  node_modules/typescript
 ```
 
-Combined with no CI ([TEST-3](#test-3-no-continuous-integration-configured)), there is currently no mechanism — automated or process-based — that would have surfaced the Electron CVE exposure in [SEC-1](#sec-1-electron-dependency-is-15-major-versions-behind-with-30-known-high-severity-cves) short of a manual audit like this one.
+Combined with no CI ([TEST-3](#test-3-no-continuous-integration-configured)), there is currently no mechanism — automated or process-based — that would have surfaced the Electron CVE exposure short of a manual audit like this one.
 
 **Root cause**
 
@@ -925,7 +861,7 @@ Add Dependabot (simplest, native to GitHub, zero extra infra) configured for the
 
 **Risks**
 
-- None directly; downstream dependency-bump PRs (like the Electron upgrade in [SEC-1](#sec-1-electron-dependency-is-15-major-versions-behind-with-30-known-high-severity-cves)) carry their own risk, but that's tracked separately.
+- None directly; downstream dependency-bump PRs (like the Electron upgrade) carry their own risk, but that's tracked separately.
 
 **Estimated effort:** Low (a few hours).
 
@@ -1216,12 +1152,12 @@ A targeted compatibility shim was implemented as a blanket, always-on intercepti
 
 **Recommended fix**
 
-Feature-detect whether `round()` in CSS values is natively supported by the current Chromium (e.g., via `CSS.supports('width', 'round(1px, 1px)')`) and skip installing the `Proxy` wrapper entirely when native support is present — which, once [SEC-1](#sec-1-electron-dependency-is-15-major-versions-behind-with-30-known-high-severity-cves)'s Electron upgrade lands (bundling Chromium well past version 125), should be the common case going forward, effectively retiring this workaround.
+Feature-detect whether `round()` in CSS values is natively supported by the current Chromium (e.g., via `CSS.supports('width', 'round(1px, 1px)')`) and skip installing the `Proxy` wrapper entirely when native support is present — which, once the Electron upgrade lands (bundling Chromium well past version 125), should be the common case going forward, effectively retiring this workaround.
 
 **Implementation steps**
 
 1. Add a `CSS.supports(...)`-based feature check before calling `wrapStyleGetter`.
-2. Re-evaluate necessity entirely after the Electron upgrade in [SEC-1](#sec-1-electron-dependency-is-15-major-versions-behind-with-30-known-high-severity-cves); likely remove outright.
+2. Re-evaluate necessity entirely after the Electron upgrade; likely remove outright.
 
 **Tests to add**
 
@@ -1235,7 +1171,7 @@ Feature-detect whether `round()` in CSS values is natively supported by the curr
 
 - Low; this is a targeted, low-risk optimization/cleanup, best done as a follow-up to the Electron upgrade rather than in isolation.
 
-**Estimated effort:** Low (a few hours), best done alongside [SEC-1](#sec-1-electron-dependency-is-15-major-versions-behind-with-30-known-high-severity-cves).
+**Estimated effort:** Low (a few hours), best done alongside the Electron upgrade.
 
 ---
 
@@ -1264,7 +1200,6 @@ Grouped by suggested timeframe. Items within a group are roughly ordered by leve
 | [TEST-3](#test-3-no-continuous-integration-configured) | Stand up a basic CI workflow (install, `tsc --noEmit`, `npm audit`) |
 | [TEST-1](#test-1-zero-unit-test-coverage-for-the-riskiest-code-in-the-repository) | Add a test framework and unit-test the PDF content-stream tokenizer |
 | [SEC-2](#sec-2-renderer-sandbox-explicitly-disabled-while-processing-untrusted-pdfs) | Re-enable the Electron renderer sandbox (`sandbox: true`) |
-| [SEC-1](#sec-1-electron-dependency-is-15-major-versions-behind-with-30-known-high-severity-cves) | Begin the staged Electron upgrade (29 → 44) |
 
 ### Short-term (this month)
 
@@ -1302,11 +1237,11 @@ Grouped by suggested timeframe. Items within a group are roughly ordered by leve
 
 ## 8. Assumptions
 
-- **Threat model.** This report assumes the application's core purpose — opening and editing PDF files supplied by the end user — includes files from **untrusted or semi-trusted sources** (downloads, email attachments, etc.), not exclusively files the user authored themselves. This assumption directly drives the severity assigned to [SEC-1](#sec-1-electron-dependency-is-15-major-versions-behind-with-30-known-high-severity-cves) and [SEC-2](#sec-2-renderer-sandbox-explicitly-disabled-while-processing-untrusted-pdfs). If the intended use is strictly self-authored/fully-trusted PDFs in a closed environment, those two findings should be downgraded in relative priority (though still worth fixing as defense-in-depth).
+- **Threat model.** This report assumes the application's core purpose — opening and editing PDF files supplied by the end user — includes files from **untrusted or semi-trusted sources** (downloads, email attachments, etc.), not exclusively files the user authored themselves. This assumption directly drives the severity assigned to [SEC-2](#sec-2-renderer-sandbox-explicitly-disabled-while-processing-untrusted-pdfs). If the intended use is strictly self-authored/fully-trusted PDFs in a closed environment, that finding should be downgraded in relative priority (though still worth fixing as defense-in-depth).
 - **Development environment.** Findings assume a Linux/CI-style environment consistent with the one used to run this analysis (Node 22, npm 10). Behavior on Windows/macOS build environments was not independently verified, particularly around the Electron packaging and `pdftotext`/Poppler dependency in [TEST-2](#test-2-existing-verify-scripts-are-manual-environment-dependent-smoke-tests).
 - **`vendor/pdf.js` submodule contents.** The submodule was not checked out in the provided archive (expected for a distribution snapshot), so this report evaluates PDF.js **integration code only**, not PDF.js's own internals — those are explicitly out of scope per `AGENTS.md`'s "Zero Submodule Modifications" constraint, and are assumed to be audited/maintained upstream by the Mozilla PDF.js project rather than this repository.
 - **`git log` history is complete and accurate** as provided in the archive (5 commits, each attributed to a different named AI agent/model via a single git author identity). This report treats that history as informative context (e.g., explaining the architecture drift in [ARCH-1](#arch-1-a-third-of-src-is-dead-code-the-specced-architecture-was-abandoned)) rather than as a finding in itself — no judgment is made about the acceptability of AI-agent-authored commits as a development practice.
-- **Severity ratings** reflect a general-purpose desktop-application risk model (confidentiality/integrity/availability impact × realistic exploitability given the app's stated purpose), not a specific organizational risk framework (e.g., CVSS was not formally computed per finding; the npm-audit-sourced CVE severities in [SEC-1](#sec-1-electron-dependency-is-15-major-versions-behind-with-30-known-high-severity-cves) are npm/GHSA's own published ratings, reproduced as-is).
+- **Severity ratings** reflect a general-purpose desktop-application risk model (confidentiality/integrity/availability impact × realistic exploitability given the app's stated purpose), not a specific organizational risk framework (e.g., CVSS was not formally computed per finding).
 - **Effort estimates** assume a single experienced full-stack/TypeScript engineer familiar with Electron, working without significant unrelated interruptions; actual effort will vary with team familiarity and process overhead (code review, staged rollout, etc.).
 - **No dynamic/runtime testing of the actual Electron GUI was performed** for this report (no display server was available in the analysis environment); all findings are based on static code inspection, `tsc` compilation, `npm audit`, and manual tracing of control/data flow. Findings that would benefit from runtime confirmation are noted as such in their "Validation steps."
 
