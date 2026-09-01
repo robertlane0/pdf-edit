@@ -2,7 +2,9 @@
 import { app, BrowserWindow, ipcMain, session } from 'electron';
 import path from 'path';
 import { registerViewerScheme, registerViewerProtocol } from './protocol';
-import { applyTextEditsToPDF, type PDFTextEdit } from '../shared/text-editor';
+import { applyTextEditsToPDF } from '../shared/text-editor';
+import { assertValidTextEdits, MAX_TEXT_EDITS } from '../shared/types';
+import type { PDFTextEdit } from '../shared/types';
 
 app.commandLine.appendSwitch('enable-features', 'BlinkExtension');
 
@@ -13,11 +15,15 @@ ipcMain.handle(
   'pdf:apply-text-edits',
   async (_event, originalPdfBytes: Uint8Array, edits: PDFTextEdit[]): Promise<Uint8Array> => {
     if (!(originalPdfBytes instanceof Uint8Array)) {
-      throw new TypeError('Expected source PDF bytes');
+      throw new TypeError('Expected source PDF bytes to be a Uint8Array');
     }
     if (!Array.isArray(edits)) {
-      throw new TypeError('Expected text edits');
+      throw new TypeError('Expected text edits to be an array');
     }
+    if (edits.length > MAX_TEXT_EDITS) {
+      throw new TypeError(`Too many text edits: ${edits.length} exceeds maximum of ${MAX_TEXT_EDITS}`);
+    }
+    assertValidTextEdits(edits);
     return applyTextEditsToPDF(originalPdfBytes, edits);
   }
 );

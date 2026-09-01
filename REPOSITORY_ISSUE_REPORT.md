@@ -105,7 +105,6 @@ grep -rniE "api[_-]?key|secret|password|token\s*=" src --include="*.ts"
 
 | ID | Title | Category | Severity | Priority | Est. Effort |
 |---|---|---|---|---|---|
-| [SEC-7](#sec-7-no-runtime-validation-of-ipc-payloads-crossing-the-trust-boundary) | No runtime validation of IPC payloads crossing the trust boundary | Security | Medium | Short-term | Low |
 | [COR-1](#cor-1-text-edit-encoding-model-cannot-represent-most-real-world-pdf-fonts) | Text-edit byte encoding ignores font encoding — garbled/failed edits | Correctness | **High** | Short-term | High |
 | [COR-2](#cor-2-failed-text-edit-exports-fail-silently) | Failed text-edit exports fail silently (console-only) | Correctness | Medium | Short-term | Low |
 | [TEST-1](#test-1-zero-unit-test-coverage-for-the-riskiest-code-in-the-repository) | Zero unit tests for the riskiest code (`pdf-text-content.ts`) | Testing | **High** | Immediate | Medium |
@@ -128,56 +127,7 @@ grep -rniE "api[_-]?key|secret|password|token\s*=" src --include="*.ts"
 
 ### 5.1 Security
 
-#### SEC-7: No runtime validation of IPC payloads crossing the trust boundary
-
-**Severity:** Medium &nbsp;|&nbsp; **Category:** Security &nbsp;|&nbsp; **Priority:** Short-term
-
-**Evidence**
-
-`src/main/index.ts:12-23`:
-
-```ts
-ipcMain.handle(
-  'pdf:apply-text-edits',
-  async (_event, originalPdfBytes: Uint8Array, edits: PDFTextEdit[]): Promise<Uint8Array> => {
-    if (!(originalPdfBytes instanceof Uint8Array)) {
-      throw new TypeError('Expected source PDF bytes');
-    }
-    if (!Array.isArray(edits)) {
-      throw new TypeError('Expected text edits');
-    }
-    return applyTextEditsToPDF(originalPdfBytes, edits);
-  }
-);
-```
-
-**Root cause**
-
-The handler validates the *container* types (`Uint8Array`, `Array`) but never validates the *shape* of each item in `edits` — `pageIndex`, `x`, `y`, `width`, `height`, `sourceText`, `text` are all trusted as-is from the renderer, whose type annotation (`PDFTextEdit[]`) is a compile-time-only guarantee that provides **no protection at runtime** once data crosses the IPC boundary (structured-clone data is untyped JSON at that point). In Electron's threat model, the main process is the trusted/privileged side and the renderer is the (comparatively) untrusted side — especially here, where the renderer's job is to display attacker-supplied PDF content. A renderer compromised via a PDF.js/Chromium bug, or simply a bug in the app's own preload logic, could invoke `pdf:apply-text-edits` with malformed `pageIndex`/coordinate values, and the main process would pass them straight into `applyTextEditsToPDF` → `pdf-lib`/the hand-rolled tokenizer with no bounds checking.
-
-**Recommended fix**
-
-Add an explicit runtime schema check for each `edits` item before calling `applyTextEditsToPDF`, rejecting malformed entries with a clear `TypeError` rather than passing them through.
-
-**Implementation steps**
-
-1. Write a small runtime validator (hand-rolled `isValidTextEdit(x): x is PDFTextEdit`, or adopt a lightweight schema library such as `zod`) checking: `id`/`sourceText`/`text` are strings; `pageIndex` is a positive integer; `x`/`y`/`width`/`height` are finite numbers.
-2. Apply it in the `pdf:apply-text-edits` handler, filtering or rejecting invalid entries before they reach `applyTextEditsToPDF`.
-3. Resolve the type-duplication issue ([ARCH-2](#arch-2-duplicate-independently-maintained-type-definitions)) at the same time by consolidating on a single canonical `PDFTextEdit` type that the validator is written against.
-
-**Tests to add**
-
-- Unit tests for the validator covering valid input, missing fields, wrong types, negative/`NaN`/`Infinity` numeric fields, and an oversized `edits` array (add a sane upper bound, e.g., reject arrays over a few thousand entries, to bound worst-case processing time per IPC call).
-
-**Validation steps**
-
-- Send a malformed payload (e.g., via a temporary debug call or a unit test invoking the exported handler logic directly) and confirm it's rejected with a clear error rather than propagating an exception from deep inside the tokenizer.
-
-**Risks**
-
-- Low; purely additive validation with no impact on well-formed requests from the app's own UI.
-
-**Estimated effort:** Low (about a day, including tests).
+*No open findings — the previously reported IPC payload validation issue has been resolved.*
 
 ---
 
@@ -663,7 +613,7 @@ Consolidate on `src/shared/types.ts` as the single canonical source for these DT
 
 **Tests to add**
 
-- N/A directly, but this reduces the risk surface for [SEC-7](#sec-7-no-runtime-validation-of-ipc-payloads-crossing-the-trust-boundary)'s validator, which should be written against the single canonical type.
+- N/A directly, but this reduces the risk surface for runtime IPC validation, which should be written against the single canonical type.
 
 **Validation steps**
 
@@ -909,7 +859,6 @@ Grouped by suggested timeframe. Items within a group are roughly ordered by leve
 
 | ID | Action |
 |---|---|
-| [SEC-7](#sec-7-no-runtime-validation-of-ipc-payloads-crossing-the-trust-boundary) | Add runtime schema validation to the `pdf:apply-text-edits` IPC handler |
 | [COR-2](#cor-2-failed-text-edit-exports-fail-silently) | Surface export failures to the user instead of console-only logging |
 | [COR-1](#cor-1-text-edit-encoding-model-cannot-represent-most-real-world-pdf-fonts) | *Start* the font-encoding-aware rework (detect-and-reject CID/complex fonts first) |
 | [TEST-2](#test-2-existing-verify-scripts-are-manual-environment-dependent-smoke-tests) | Convert manual verify scripts into repo-contained, CI-runnable tests |

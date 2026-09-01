@@ -1,20 +1,9 @@
 import { PDFDocument } from 'pdf-lib';
 import { applyTextReplacementToPDF, type ContentTextReplacement } from './pdf-text-content';
+import type { PDFTextEdit } from './types';
 
-/**
- * A replacement for a single PDF text-layer run. Coordinates are PDF points
- * and use the PDF bottom-left origin so the selection survives viewer zoom.
- */
-export interface PDFTextEdit {
-  id: string;
-  pageIndex: number;
-  sourceText: string;
-  text: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+// Re-export the canonical type so existing import paths continue to work.
+export type { PDFTextEdit } from './types';
 
 /**
  * Rewrites the page's existing text-showing operator instead of drawing an
