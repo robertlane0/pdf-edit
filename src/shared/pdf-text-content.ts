@@ -880,7 +880,7 @@ function getFontDictForPage(
     // Try direct attribute lookup for inherited case
     const dictRef = (page.node as unknown as { getInheritableAttribute: (n: PDFName) => unknown }).getInheritableAttribute?.(PDFName.of('Resources'));
     if (dictRef) {
-      const resDict = pdfDocument.context.lookupMaybe(dictRef as any, PDFDict);
+      const resDict = safeLookup(pdfDocument, dictRef, PDFDict);
       if (resDict) {
         fontDictMap = resDict.lookupMaybe(PDFName.of('Font'), PDFDict);
       }
@@ -889,7 +889,7 @@ function getFontDictForPage(
   if (!fontDictMap) return undefined;
   const fontRefOrDict = fontDictMap.get(PDFName.of(fontName));
   if (!fontRefOrDict) return undefined;
-  const dict = pdfDocument.context.lookupMaybe(fontRefOrDict as any, PDFDict);
+  const dict = safeLookup(pdfDocument, fontRefOrDict, PDFDict);
   if (dict) return dict;
   // If it's already a dict (not a ref), handle direct dict case
   if (fontRefOrDict instanceof PDFDict) return fontRefOrDict as PDFDict;
@@ -905,7 +905,7 @@ function inspectFontSubtype(fontDict: PDFDict, pdfDocument: PDFDocument): string
   const subtypeObj = fontDict.get(PDFName.of('Subtype'));
   if (!subtypeObj) return undefined;
   // Try to resolve via context lookup if it's a ref
-  const subtypeName = pdfDocument.context.lookupMaybe(subtypeObj as any, PDFName as any) as PDFName | undefined;
+  const subtypeName = safeLookup(pdfDocument, subtypeObj, PDFName) as PDFName | undefined;
   if (subtypeName) {
     // PDFName has decodeText / asString
     try {
@@ -954,7 +954,7 @@ function buildUnicodeToByteMap(
   const encodingObj = fontDict.get(PDFName.of('Encoding'));
   if (encodingObj) {
     // Could be PDFName (e.g., /WinAnsiEncoding) or PDFDict
-    const asName = pdfDocument.context.lookupMaybe(encodingObj as any, PDFName as any) as PDFName | undefined;
+    const asName = safeLookup(pdfDocument, encodingObj, PDFName) as PDFName | undefined;
     if (asName) {
       try {
         const txt = (asName as any).decodeText?.() ?? (asName as any).asString?.() ?? asName.toString();
@@ -963,11 +963,11 @@ function buildUnicodeToByteMap(
         baseEncodingName = asName.toString().replace(/^\//, '');
       }
     } else {
-      const asDict = pdfDocument.context.lookupMaybe(encodingObj as any, PDFDict) as PDFDict | undefined;
+      const asDict = safeLookup(pdfDocument, encodingObj, PDFDict) as PDFDict | undefined;
       if (asDict) {
         const baseNameObj = asDict.get(PDFName.of('BaseEncoding'));
         if (baseNameObj) {
-          const baseName = pdfDocument.context.lookupMaybe(baseNameObj as any, PDFName as any) as PDFName | undefined;
+          const baseName = safeLookup(pdfDocument, baseNameObj, PDFName) as PDFName | undefined;
           if (baseName) {
             try {
               const txt2 = (baseName as any).decodeText?.() ?? (baseName as any).asString?.() ?? baseName.toString();
@@ -979,7 +979,7 @@ function buildUnicodeToByteMap(
         }
         const diffObj = asDict.get(PDFName.of('Differences'));
         if (diffObj) {
-          const diffArray = pdfDocument.context.lookupMaybe(diffObj as any, PDFArray) as PDFArray | undefined;
+          const diffArray = safeLookup(pdfDocument, diffObj, PDFArray) as PDFArray | undefined;
           if (diffArray) differences = diffArray;
           else if (diffObj instanceof PDFArray) differences = diffObj as PDFArray;
         }
@@ -1025,13 +1025,13 @@ function buildMapFromBaseEncoding(
     for (let i = 0; i < differences.size(); i++) {
       const obj = differences.get(i);
       // obj could be PDFNumber or PDFName or PDFRef
-      const asNumber = pdfDocument.context.lookupMaybe(obj as any, PDFNumber as any) as PDFNumber | undefined;
+      const asNumber = safeLookup(pdfDocument, obj, PDFNumber) as PDFNumber | undefined;
       if (asNumber) {
         currentCode = (asNumber as any).asNumber?.() ?? (asNumber as any).value?.() ?? Number((asNumber as any).toString());
         continue;
       }
       // Try PDFName
-      const asName = pdfDocument.context.lookupMaybe(obj as any, PDFName as any) as PDFName | undefined;
+      const asName = safeLookup(pdfDocument, obj, PDFName) as PDFName | undefined;
       let glyphName: string | null = null;
       if (asName) {
         try {
@@ -1108,6 +1108,19 @@ function getBaseEncodingByteToUnicodeImpl(name: string): readonly (number | null
 function getBaseEncodingByteToUnicodeGeneric(_name: string): readonly (number | null)[] | null {
   return null;
 }
+function safeLookup(pdfDocument: PDFDocument, obj: unknown, type: any): any {
+  try {
+    // Use lookup without type to dereference without throwing on type mismatch
+    const result = (pdfDocument.context.lookup as any)(obj as any);
+    if (result instanceof (type as any)) return result as any;
+    // Also consider direct instance check for cases where lookup returns undefined for direct objects
+    if (obj instanceof (type as any)) return obj as any;
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 
 
 function decodeLiteralString(raw: Uint8Array): Uint8Array {
@@ -1550,7 +1563,7 @@ export async function applyTextReplacementToPDF(
             const fontMap = resources?.lookupMaybe(PDFName.of('Font'), PDFDict);
             if (fontMap) {
               for (const [, fontObj] of fontMap.entries()) {
-                const dict = pdfDocument.context.lookupMaybe(fontObj as any, PDFDict) as PDFDict | undefined;
+                const dict = safeLookup(pdfDocument, fontObj, PDFDict) as PDFDict | undefined;
                 if (dict && isCompositeFont(dict, pdfDocument)) {
                   isComposite = true;
                   fontNameForError = '(unknown, but page contains composite font)';
