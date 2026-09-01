@@ -105,7 +105,6 @@ grep -rniE "api[_-]?key|secret|password|token\s*=" src --include="*.ts"
 
 | ID | Title | Category | Severity | Priority | Est. Effort |
 |---|---|---|---|---|---|
-| [SEC-4](#sec-4-runtime-csp-weakening-via-regex-injected-unsafe-inline) | Runtime CSP weakening injects `'unsafe-inline'` | Security | Medium | Short-term | Low |
 | [SEC-5](#sec-5-postmessage-listeners-accept-messages-from-any-origin) | `postMessage` used with no origin validation | Security | Low–Medium | Short-term | Low |
 | [SEC-6](#sec-6-eval-based-polyfill-injection-and-unscoped-prototype-patching) | `eval()`-based polyfill injection + global prototype patching | Security | Medium | Medium-term | Medium |
 | [SEC-7](#sec-7-no-runtime-validation-of-ipc-payloads-crossing-the-trust-boundary) | No runtime validation of IPC payloads crossing the trust boundary | Security | Medium | Short-term | Low |
@@ -130,59 +129,6 @@ grep -rniE "api[_-]?key|secret|password|token\s*=" src --include="*.ts"
 ## 5. Detailed Findings
 
 ### 5.1 Security
-
-#### SEC-4: Runtime CSP weakening via regex-injected `'unsafe-inline'`
-
-**Severity:** Medium &nbsp;|&nbsp; **Category:** Security &nbsp;|&nbsp; **Priority:** Short-term
-
-**Evidence**
-
-`src/main/protocol.ts:184-200`:
-
-```ts
-if (safePath.endsWith('.html')) {
-  try {
-    let content = await fs.promises.readFile(safePath, 'utf8');
-    content = content.replace(
-      /style-src 'self'/,
-      "style-src 'self' 'unsafe-inline'"
-    );
-    return new Response(content, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
-  } catch { /* Fallback to net.fetch */ }
-}
-```
-
-**Root cause**
-
-Every HTML file served through the custom protocol — not just `viewer.html` — has its `style-src` CSP directive silently rewritten to add `'unsafe-inline'` via a brittle string-literal regex match. This is done to accommodate PDF.js's inline style usage in the text/overlay layers, but it weakens the Content-Security-Policy for the entire origin as a blanket rule rather than scoping the relaxation to what's actually needed, and it will silently no-op (leaving the original, stricter CSP) if PDF.js ever reorders or reformats its CSP meta tag, which would be a confusing, hard-to-diagnose behavior change.
-
-**Recommended fix**
-
-- Prefer nonce- or hash-based CSP allowances for the specific inline styles PDF.js/the overlay layer needs, rather than blanket `'unsafe-inline'`.
-- If `'unsafe-inline'` for styles is unavoidable given PDF.js's architecture, scope the rewrite explicitly to `viewer.html` only (not every `.html` file served), and log (in development builds) when the regex fails to match so silent CSP drift is visible.
-
-**Implementation steps**
-
-1. Restrict the `.replace` block to files matching the known viewer entry point (e.g., check `safePath.endsWith('web/viewer.html')` rather than any `.html`).
-2. Add a fallback warning (`console.warn` in dev mode only) when the regex doesn't match the expected `style-src 'self'` pattern, so a PDF.js update that reformats the CSP doesn't silently change security posture unnoticed.
-3. Evaluate whether PDF.js's specific inline-style use cases can be replaced with class-based styling to avoid needing `'unsafe-inline'` at all.
-
-**Tests to add**
-
-- A unit test around `registerViewerProtocol`'s HTML-serving branch (extract the CSP-rewrite logic into a small, independently testable function) asserting: (a) `viewer.html`'s CSP gains `'unsafe-inline'` for `style-src`; (b) an unrelated `.html` file's CSP is left untouched; (c) an HTML file without a matching `style-src 'self'` pattern is returned unmodified and triggers the dev-mode warning.
-
-**Validation steps**
-
-- Load the app and inspect the served `viewer.html`'s CSP header/meta tag in devtools to confirm scoping is correct.
-- Confirm non-viewer HTML assets (if any are added later) are served with their original CSP.
-
-**Risks**
-
-- Low; primarily a hardening/clarity change with minimal behavioral surface area.
-
-**Estimated effort:** Low (half a day).
-
----
 
 #### SEC-5: `postMessage` listeners accept messages from any origin
 
@@ -1086,7 +1032,6 @@ Grouped by suggested timeframe. Items within a group are roughly ordered by leve
 
 | ID | Action |
 |---|---|
-| [SEC-4](#sec-4-runtime-csp-weakening-via-regex-injected-unsafe-inline) | Scope/harden the CSP `unsafe-inline` rewrite |
 | [SEC-5](#sec-5-postmessage-listeners-accept-messages-from-any-origin) | Add origin validation to `postMessage` usage |
 | [SEC-7](#sec-7-no-runtime-validation-of-ipc-payloads-crossing-the-trust-boundary) | Add runtime schema validation to the `pdf:apply-text-edits` IPC handler |
 | [COR-2](#cor-2-failed-text-edit-exports-fail-silently) | Surface export failures to the user instead of console-only logging |

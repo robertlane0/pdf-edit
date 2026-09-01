@@ -153,6 +153,21 @@ export function transformCssLightDark(cssContent: string): string {
 }
 
 /**
+ * Rewrites the CSP meta tag in viewer.html to allow inline styles required by
+ * PDF.js text-layer/overlay. Extracted as a pure function for unit testing.
+ *
+ * - Returns `didRewrite: true` iff the expected `style-src 'self'` pattern was
+ *   found and rewritten to `style-src 'self' 'unsafe-inline'`.
+ * - If `didRewrite` is false, the returned `content` is identical to the input
+ *   and the caller should emit a dev-mode warning so a PDF.js CSP format change
+ *   does not silently alter security posture (SEC-4).
+ */
+export function rewriteViewerCsp(htmlContent: string): { content: string; didRewrite: boolean } {
+  const rewritten = htmlContent.replace(/style-src 'self'/, "style-src 'self' 'unsafe-inline'");
+  return { content: rewritten, didRewrite: rewritten !== htmlContent };
+}
+
+/**
  * Must be called AFTER app.ready.
  * Handles app-viewer:// requests by serving files from dist/pdfjs/.
  *
@@ -182,15 +197,20 @@ export function registerViewerProtocol(ses?: Electron.Session) {
       }
     }
 
-    // For viewer.html, ensure style-src permits inline styles needed by PDF.js text layer & overlay
-    if (safePath.endsWith('.html')) {
+    // For viewer.html, ensure style-src permits inline styles needed by PDF.js text layer & overlay.
+    // Scoped strictly to web/viewer.html to avoid weakening CSP for other HTML files.
+    // The rewrite is extracted via rewriteViewerCsp() for testability (see SEC-4).
+    if (safePath.replace(/\\/g, '/').endsWith('web/viewer.html')) {
       try {
-        let content = await fs.promises.readFile(safePath, 'utf8');
-        content = content.replace(
-          /style-src 'self'/,
-          "style-src 'self' 'unsafe-inline'"
-        );
-        return new Response(content, {
+        const rawContent = await fs.promises.readFile(safePath, 'utf8');
+        const { content: rewritten, didRewrite } = rewriteViewerCsp(rawContent);
+        if (!didRewrite && process.env.NODE_ENV !== 'production') {
+          console.warn(
+            "[protocol] CSP rewrite: expected \"style-src 'self'\" pattern not found in viewer.html — " +
+              'CSP may not have been relaxed as intended. Check PDF.js CSP format.'
+          );
+        }
+        return new Response(rewritten, {
           headers: {
             'Content-Type': 'text/html; charset=utf-8'
           }
