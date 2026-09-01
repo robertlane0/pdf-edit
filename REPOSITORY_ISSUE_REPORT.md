@@ -105,7 +105,6 @@ grep -rniE "api[_-]?key|secret|password|token\s*=" src --include="*.ts"
 
 | ID | Title | Category | Severity | Priority | Est. Effort |
 |---|---|---|---|---|---|
-| [COR-1](#cor-1-text-edit-encoding-model-cannot-represent-most-real-world-pdf-fonts) | Text-edit byte encoding ignores font encoding — garbled/failed edits | Correctness | **High** | Short-term | High |
 | [COR-2](#cor-2-failed-text-edit-exports-fail-silently) | Failed text-edit exports fail silently (console-only) | Correctness | Medium | Short-term | Low |
 | [TEST-1](#test-1-zero-unit-test-coverage-for-the-riskiest-code-in-the-repository) | Zero unit tests for the riskiest code (`pdf-text-content.ts`) | Testing | **High** | Immediate | Medium |
 | [TEST-2](#test-2-existing-verify-scripts-are-manual-environment-dependent-smoke-tests) | "Verify" scripts are manual, non-CI-able smoke tests | Testing | Medium–High | Short-term | Medium |
@@ -132,72 +131,6 @@ grep -rniE "api[_-]?key|secret|password|token\s*=" src --include="*.ts"
 ---
 
 ### 5.2 Correctness
-
-#### COR-1: Text-edit encoding model cannot represent most real-world PDF fonts
-
-**Severity:** High &nbsp;|&nbsp; **Category:** Correctness &nbsp;|&nbsp; **Priority:** Short-term (start now; full fix is high-effort)
-
-**Evidence**
-
-`src/shared/pdf-text-content.ts:55-65`:
-
-```ts
-function latin1ToBytes(value: string): Uint8Array {
-  const bytes = new Uint8Array(value.length);
-  for (let i = 0; i < value.length; i += 1) {
-    const code = value.charCodeAt(i);
-    if (code > 0xff) {
-      throw new Error('The replacement text contains characters that cannot be encoded in the existing PDF text run.');
-    }
-    bytes[i] = code;
-  }
-  return bytes;
-}
-```
-
-This function is used in `applyReplacementToBytes` (`pdf-text-content.ts:337-339`) to encode the user's replacement text directly as raw single bytes, one JS UTF-16 code unit → one PDF content-stream byte, with **no reference to the page's actual font `Encoding`/`ToUnicode` CMap**, and no distinction between simple (single-byte) fonts and composite/CID (often double-byte, `Identity-H`) fonts.
-
-**Root cause**
-
-PDF content-stream text-showing operators (`Tj`, `TJ`, `'`, `"`) don't contain literal Unicode text — they contain **byte codes that are meaningful only relative to the specific font's encoding**, which for embedded/subsetted fonts (the overwhelming majority of PDFs produced by browsers' "Print to PDF", Word/LibreOffice PDF export, LaTeX, and most modern generators) is a custom, per-document mapping with no fixed relationship to Latin-1 or Unicode code points. This code assumes JS char code 0–255 maps directly onto the font's byte encoding, which is:
-
-- **Incorrect for CID/Identity‑H fonts** (double-byte codes) — this code will produce corrupted output (wrong or garbled glyphs) rather than an error, because bytes 0x00–0xFF are all individually "valid" as far as `latin1ToBytes` is concerned, they just don't mean what the code assumes.
-- **A hard failure for any replacement character outside Latin‑1** (emoji, most non-Western scripts, and many typographic characters like curly quotes/em-dashes if the app ever normalizes them to their true Unicode code points above U+00FF) — this throws, and (per [COR-2](#cor-2-failed-text-edit-exports-fail-silently)) that failure is currently swallowed silently in the UI.
-- **Only reliable when deleting text or substituting with characters that are known to already exist at the same byte values in the source run** — which is exactly the one case the repository's single verification script (`scripts/verify-text-edit.js`) tests (deleting the word "Languages"). The test suite's one scenario does not exercise character *insertion*, which is where this limitation actually bites.
-
-**Recommended fix**
-
-This is a substantial, multi-step fix, not a one-line patch:
-
-1. **Short-term (defensive):** Detect whether the target font is a simple (single-byte) font with a standard/WinAnsi-compatible encoding before allowing character-level substitution; if the font is a composite/CID font or has a non-standard `Differences` encoding, reject the edit with a clear, user-facing error rather than silently producing corrupted output.
-2. **Medium-term:** For simple fonts, look up the font's actual `/Encoding` (base encoding + `/Differences` array) and map each replacement Unicode character to the correct byte code for *that* font, rather than assuming Latin‑1 identity — falling back to a clear error if a needed character isn't in the font's encoding at all (i.e., don't silently substitute a wrong glyph).
-3. **Long-term:** For full correctness, evaluate whether new/substituted glyphs can be added at all without re-embedding font subsets (out of scope for a byte-splice approach) — this may mean the product scope should explicitly document that "insert new characters not already used elsewhere on the page" is unsupported for CID fonts, rather than attempting silently to support it.
-
-**Implementation steps**
-
-1. Extend `getContentStreams`/the replacement pipeline in `pdf-text-content.ts` to also resolve the font resource associated with the target text run (via the page's `/Resources/Font` dictionary and the `Tf` operator preceding the run) and inspect its `/Subtype` and `/Encoding`.
-2. Branch: for `/Subtype /Type0` (composite) fonts, reject with a descriptive error (do not attempt byte substitution) until proper CID-aware encoding is implemented.
-3. For simple fonts, build a code-point → byte-code map from the font's base encoding (`WinAnsiEncoding`/`MacRomanEncoding`/`StandardEncoding`) plus any `/Differences`, and use that map in place of `latin1ToBytes`.
-4. Surface a clear, specific error message distinguishing "this font can't be edited with new characters" from generic failures.
-
-**Tests to add**
-
-- Unit tests against a small corpus of representative fixture PDFs (checked into `test/fixtures/`): (a) a simple WinAnsi-encoded font, editing/inserting ASCII and Latin‑1 characters — should succeed; (b) a CID/Identity‑H font (e.g., produced by a typical browser print-to-PDF) — attempting to insert new characters should fail with a clear, specific error rather than corrupting the output; (c) deleting text (empty replacement) on a CID font — should still succeed, since deletion doesn't require new byte encoding.
-- A round-trip test: apply an edit, save, reload with `pdf-lib`, and verify the page's content stream is still syntactically valid (this partially exists already via the "page count unchanged" check in `verify-text-edit.js`, but should be promoted to an automated unit/integration test and extended to validate content-stream well-formedness, not just page count).
-
-**Validation steps**
-
-- Run the new fixture-based tests; confirm CID-font insertion is rejected cleanly (not silently corrupted) and simple-font edits still work.
-- Manually test against a PDF exported from a common real-world tool (e.g., Chrome's "Print to PDF", Google Docs export, or LibreOffice) — these commonly use embedded subset fonts and are a realistic stress test.
-
-**Risks**
-
-- This is the highest-effort item in the report and touches the app's core value proposition; consider explicitly scoping the *product* (not just the code) — e.g., "Edit PDF text" could ship with a documented "supported font types" list rather than attempting to universally support arbitrary insertion, which meaningfully reduces engineering risk versus attempting full CID-aware re-encoding.
-- Any change to the tokenizer/replacement engine should only be made once [TEST-1](#test-1-zero-unit-test-coverage-for-the-riskiest-code-in-the-repository) exists, so regressions in the (already fairly intricate) byte-splicing logic are caught mechanically.
-
-**Estimated effort:** High (1–2+ weeks depending on how much of the CID/encoding-aware path is implemented vs. simply detected-and-rejected).
-
----
 
 #### COR-2: Failed text-edit exports fail silently
 
@@ -860,7 +793,6 @@ Grouped by suggested timeframe. Items within a group are roughly ordered by leve
 | ID | Action |
 |---|---|
 | [COR-2](#cor-2-failed-text-edit-exports-fail-silently) | Surface export failures to the user instead of console-only logging |
-| [COR-1](#cor-1-text-edit-encoding-model-cannot-represent-most-real-world-pdf-fonts) | *Start* the font-encoding-aware rework (detect-and-reject CID/complex fonts first) |
 | [TEST-2](#test-2-existing-verify-scripts-are-manual-environment-dependent-smoke-tests) | Convert manual verify scripts into repo-contained, CI-runnable tests |
 | [ARCH-2](#arch-2-duplicate-independently-maintained-type-definitions) | Consolidate duplicate type definitions onto `shared/types.ts` |
 | [ARCH-3](#arch-3-no-linting-or-formatting-tooling-configured) | Add ESLint + Prettier, enforce in CI |
@@ -871,7 +803,6 @@ Grouped by suggested timeframe. Items within a group are roughly ordered by leve
 
 | ID | Action |
 |---|---|
-| [COR-1](#cor-1-text-edit-encoding-model-cannot-represent-most-real-world-pdf-fonts) | Complete font-encoding-aware substitution for simple (non-CID) fonts |
 | [DOC-2](#doc-2-no-contributing-changelog-or-security-policy) | Add `CONTRIBUTING.md`, `CHANGELOG.md`, `SECURITY.md` |
 | [PERF-1](#perf-1-full-content-stream-re-tokenization-and-reallocation-per-individual-edit) | Batch per-page tokenization/edit application |
 
