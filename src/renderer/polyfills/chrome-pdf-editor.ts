@@ -3,6 +3,7 @@
 export const chromePdfEditor = {
   onPageRendered: (callback: (data: { pageNumber: number; scale: number }) => void) => {
     window.addEventListener('message', (event) => {
+      if (event.origin !== window.location.origin) return;
       if (event.data?.type === 'PDF_PAGE_RENDERED') {
         callback(event.data.payload);
       }

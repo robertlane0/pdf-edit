@@ -105,7 +105,6 @@ grep -rniE "api[_-]?key|secret|password|token\s*=" src --include="*.ts"
 
 | ID | Title | Category | Severity | Priority | Est. Effort |
 |---|---|---|---|---|---|
-| [SEC-5](#sec-5-postmessage-listeners-accept-messages-from-any-origin) | `postMessage` used with no origin validation | Security | Low–Medium | Short-term | Low |
 | [SEC-6](#sec-6-eval-based-polyfill-injection-and-unscoped-prototype-patching) | `eval()`-based polyfill injection + global prototype patching | Security | Medium | Medium-term | Medium |
 | [SEC-7](#sec-7-no-runtime-validation-of-ipc-payloads-crossing-the-trust-boundary) | No runtime validation of IPC payloads crossing the trust boundary | Security | Medium | Short-term | Low |
 | [COR-1](#cor-1-text-edit-encoding-model-cannot-represent-most-real-world-pdf-fonts) | Text-edit byte encoding ignores font encoding — garbled/failed edits | Correctness | **High** | Short-term | High |
@@ -129,73 +128,6 @@ grep -rniE "api[_-]?key|secret|password|token\s*=" src --include="*.ts"
 ## 5. Detailed Findings
 
 ### 5.1 Security
-
-#### SEC-5: `postMessage` listeners accept messages from any origin
-
-**Severity:** Low–Medium &nbsp;|&nbsp; **Category:** Security &nbsp;|&nbsp; **Priority:** Short-term
-
-**Evidence**
-
-`src/preload/viewer-preload.ts:610-617` broadcasts with a wildcard target origin:
-
-```js
-window.postMessage({
-  type: 'PDF_PAGE_RENDERED',
-  payload: { pageNumber: pageIndex, scale: App.pdfViewer.currentScale, viewport: pageView.viewport }
-}, '*');
-```
-
-and `src/renderer/polyfills/chrome-pdf-editor.ts:5-9` (an otherwise-unused module modeling the intended consumer) listens without checking `event.origin`:
-
-```ts
-onPageRendered: (callback) => {
-  window.addEventListener('message', (event) => {
-    if (event.data?.type === 'PDF_PAGE_RENDERED') {
-      callback(event.data.payload);
-    }
-  });
-}
-```
-
-**Root cause**
-
-Neither side of this `postMessage` channel validates origin (CWE-346). Given the app currently loads only first-party content from the `app-viewer://` scheme in a single top-level window with no iframes, the practical exploitability today is low. However, this is the kind of pattern that becomes a real vulnerability the moment the app evolves to embed any third-party or lower-trust content (e.g., a future "open in browser panel" feature, an `<iframe>` preview, or the currently-dead `extensions.ts` MV3 extension loader being wired up) — any such frame could post a spoofed `PDF_PAGE_RENDERED` message today with no origin check to stop it.
-
-**Recommended fix**
-
-Use explicit target/expected origins instead of `'*'`, and validate `event.origin` in listeners:
-
-```js
-window.postMessage({ type: 'PDF_PAGE_RENDERED', payload: {...} }, window.location.origin);
-```
-
-```ts
-window.addEventListener('message', (event) => {
-  if (event.origin !== window.location.origin) return;
-  if (event.data?.type === 'PDF_PAGE_RENDERED') callback(event.data.payload);
-});
-```
-
-**Implementation steps**
-
-1. Replace `'*'` with `window.location.origin` (which, under the `app-viewer://` privileged scheme, is a well-defined, stable origin) in `viewer-preload.ts`.
-2. Add an `event.origin` check to the listener in `chrome-pdf-editor.ts` (and any future consumers of this message channel).
-
-**Tests to add**
-
-- A unit test (or a jsdom-based test) verifying the message handler ignores payloads from an unexpected `origin` and processes ones from the expected origin.
-
-**Validation steps**
-
-- Manually post a `PDF_PAGE_RENDERED`-shaped message from devtools with a mismatched simulated origin (or verify via code review that the origin check is present and correctly scoped) and confirm it's ignored.
-
-**Risks**
-
-- Very low; this is an additive check with no impact on legitimate same-origin messaging.
-
-**Estimated effort:** Low (a few hours).
-
----
 
 #### SEC-6: `eval()`-based polyfill injection and unscoped prototype patching
 
@@ -1032,7 +964,6 @@ Grouped by suggested timeframe. Items within a group are roughly ordered by leve
 
 | ID | Action |
 |---|---|
-| [SEC-5](#sec-5-postmessage-listeners-accept-messages-from-any-origin) | Add origin validation to `postMessage` usage |
 | [SEC-7](#sec-7-no-runtime-validation-of-ipc-payloads-crossing-the-trust-boundary) | Add runtime schema validation to the `pdf:apply-text-edits` IPC handler |
 | [COR-2](#cor-2-failed-text-edit-exports-fail-silently) | Surface export failures to the user instead of console-only logging |
 | [COR-1](#cor-1-text-edit-encoding-model-cannot-represent-most-real-world-pdf-fonts) | *Start* the font-encoding-aware rework (detect-and-reject CID/complex fonts first) |

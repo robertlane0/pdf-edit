@@ -614,7 +614,7 @@ const mainWorldInitScript = `
             scale: App.pdfViewer.currentScale,
             viewport: pageView.viewport
           }
-        }, '*');
+        }, window.location.origin);
       });
       installTextEditor(App);
     });
