@@ -32,14 +32,13 @@
 
 `pdf-edit` is a small (~1,800 line) TypeScript/Electron desktop application that embeds PDF.js (as an untouched git submodule) to view and edit PDF files, including direct in-place editing of existing PDF text runs via low-level content-stream manipulation. The codebase was built by a sequence of AI coding agents against a master specification (`AGENTS.md`); git history shows five commits, each attributed to a different agent/model, with no human-authored commits visible in the provided history.
 
-The application is functional at a basic level (it type-checks cleanly with `strict` TypeScript and has no build errors), but it carries **real risk in four areas**:
+The application is functional at a basic level (it type-checks cleanly with `strict` TypeScript and has no build errors), but it carries **real risk in three areas**:
 
-- **Security posture is weaker than the codebase's own stated threat model.** The app explicitly serves untrusted, user-supplied PDF files, yet it explicitly disables Chromium's renderer sandbox (`sandbox: false`) — the opposite of Electron's hardened defaults for an app that parses attacker-controllable input.
 - **The core "edit PDF text in place" feature has a correctness gap that isn't exercised by any test.** Replacement text is spliced into the content stream as raw Latin‑1 bytes with no awareness of the page's actual font encoding. This works for ASCII deletions/substitutions against simple fonts, but will silently corrupt or throw for the very common case of subsetted/CID-embedded fonts and non‑Latin‑1 characters — which is most PDFs produced by modern authoring tools.
 - **There is no automated testing or CI.** The three "verification" scripts in `scripts/` are manual, GUI-dependent smoke tests that require files and binaries that don't exist in the repository, and two of the three aren't even wired into `npm scripts`. The single most complex and highest-risk file in the repo (`pdf-text-content.ts`, a hand-rolled PDF content-stream tokenizer) has zero unit tests.
 - **Roughly a third of `src/` is dead code.** Five of twelve TypeScript modules (`extensions.ts`, `event-bus.ts`, `overlay-manager.ts`, `viewport-math.ts`, `chrome-pdf-editor.ts`, plus the unused `pdf-merger.ts` and `types.ts`) are never imported by the application's actual entry points. The real, working logic was instead written inline as a large `eval`'d string inside `viewer-preload.ts`, duplicating logic that exists — better-typed — in the unused modules.
 
-None of these issues currently block the app from running, but together they represent significant risk for a project that (a) processes untrusted files by design and (b) has no safety net (tests/CI) to catch regressions as it grows. This report catalogs **21 detailed findings** plus a set of minor observations, each with evidence, root cause, a concrete fix, and effort/risk estimates, and closes with a prioritized remediation roadmap.
+None of these issues currently block the app from running, but together they represent significant risk for a project that (a) processes untrusted files by design and (b) has no safety net (tests/CI) to catch regressions as it grows. This report catalogs **20 detailed findings** plus a set of minor observations, each with evidence, root cause, a concrete fix, and effort/risk estimates, and closes with a prioritized remediation roadmap.
 
 ---
 
@@ -106,7 +105,6 @@ grep -rniE "api[_-]?key|secret|password|token\s*=" src --include="*.ts"
 
 | ID | Title | Category | Severity | Priority | Est. Effort |
 |---|---|---|---|---|---|
-| [SEC-2](#sec-2-renderer-sandbox-explicitly-disabled-while-processing-untrusted-pdfs) | Renderer sandbox explicitly disabled for untrusted PDF input | Security | **High** | Immediate | Medium |
 | [SEC-3](#sec-3-path-traversal-guard-in-the-custom-protocol-handler-uses-an-unanchored-prefix-check) | Path-traversal guard uses unanchored prefix check | Security | Medium | Short-term | Low |
 | [SEC-4](#sec-4-runtime-csp-weakening-via-regex-injected-unsafe-inline) | Runtime CSP weakening injects `'unsafe-inline'` | Security | Medium | Short-term | Low |
 | [SEC-5](#sec-5-postmessage-listeners-accept-messages-from-any-origin) | `postMessage` used with no origin validation | Security | Low–Medium | Short-term | Low |
@@ -133,64 +131,6 @@ grep -rniE "api[_-]?key|secret|password|token\s*=" src --include="*.ts"
 ## 5. Detailed Findings
 
 ### 5.1 Security
-
-#### SEC-2: Renderer sandbox explicitly disabled while processing untrusted PDFs
-
-**Severity:** High &nbsp;|&nbsp; **Category:** Security &nbsp;|&nbsp; **Priority:** Immediate
-
-**Evidence**
-
-`src/main/index.ts:33-43`:
-
-```ts
-const mainWindow = new BrowserWindow({
-  width: 1280,
-  height: 800,
-  webPreferences: {
-    session: pdfSession,
-    preload: path.join(__dirname, '../preload/viewer-preload.js'),
-    contextIsolation: true,
-    nodeIntegration: false,
-    sandbox: false          // <-- explicitly disabled
-  }
-});
-```
-
-The same `sandbox: false` setting is repeated in the two verify scripts (`scripts/verify-electron.js:26`, `scripts/verify-full-lifecycle.js:26`), and `scripts/verify-electron.js:7` additionally passes the Chromium-level `--no-sandbox` command-line switch.
-
-**Root cause**
-
-Since Electron 20, `sandbox: true` is the secure **default** for all renderers. This code explicitly opts out of that default. Nothing in the preload script (`contextBridge`, `ipcRenderer`, `webFrame` — all sandbox-compatible APIs in modern Electron) appears to require an unsandboxed renderer; there is no comment in the code explaining why sandboxing was turned off, suggesting it may have been disabled reflexively (e.g., while debugging) rather than out of necessity.
-
-**Why it matters:** the renderer process's job is to parse and display **untrusted** PDF byte streams via PDF.js. A memory-safety or logic bug in the PDF/JS parsing pipeline (PDF.js itself, or the Chromium `<canvas>`/font-rendering stack it depends on) is a realistic path to renderer compromise for a PDF viewer. With `sandbox: false`, a compromised renderer has substantially more OS-level capability than Chromium's hardened default sandbox would allow, meaningfully raising the impact ceiling of any future renderer-side bug — including PDF.js CVEs disclosed after this snapshot.
-
-**Recommended fix**
-
-Remove `sandbox: false` (i.e., let it default to `true`), or set it explicitly to `true` for clarity, and re-test the app.
-
-**Implementation steps**
-
-1. Set `sandbox: true` (or delete the line) in `src/main/index.ts` and both verify scripts.
-2. Run `npm run build && npm start`; confirm the preload script still loads and `window.__PDF_ADAPTER__` / `window.__PDF_TEXT_EDITOR_IPC__` are still exposed (sandboxed preloads in modern Electron support `contextBridge` and `ipcRenderer` natively, so this is expected to work without further changes).
-3. If sandboxing surfaces an incompatibility (e.g., a Node core module import that isn't available in a sandboxed preload), isolate that dependency into the main process and proxy it over IPC instead of removing sandboxing again.
-4. Remove the `--no-sandbox` Chromium switch from the verify scripts once confirmed unnecessary.
-
-**Tests to add**
-
-- A CI/smoke-test assertion that `webPreferences.sandbox !== false` for every `BrowserWindow` construction in the codebase (a simple grep-based lint rule or a runtime assertion is sufficient given the codebase's current size).
-
-**Validation steps**
-
-- App launches and the PDF viewer renders correctly with `sandbox: true`.
-- `window.__PDF_ADAPTER__.addAnnotation` and the text-edit IPC round-trip both still function (exercise via `verify-full-lifecycle.js`).
-
-**Risks**
-
-- Low risk of behavioral regression since the preload only uses sandbox-compatible Electron APIs; primary risk is a possible incompatibility if any future preload code assumes access to Node core modules directly (which sandboxed preloads restrict).
-
-**Estimated effort:** Medium (mostly testing time; the code change itself is a one-line flip, but Electron sandboxing regressions can be subtle and merit a full manual pass).
-
----
 
 #### SEC-3: Path-traversal guard in the custom protocol handler uses an unanchored prefix check
 
@@ -786,7 +726,7 @@ Same as [DOC-1](#doc-1-no-readme-or-contributor-facing-documentation) — these 
 
 - `CONTRIBUTING.md`: coding conventions (once [ARCH-3](#arch-3-no-linting-or-formatting-tooling-configured) establishes them), how to run tests/CI locally, PR expectations.
 - `CHANGELOG.md`: start tracking user-visible changes going forward (the git log's commit messages are agent/tooling-oriented, not a substitute for a curated changelog).
-- `SECURITY.md`: given this app processes untrusted PDF files and has a real attack surface ([SEC-2](#sec-2-renderer-sandbox-explicitly-disabled-while-processing-untrusted-pdfs)), a documented process for reporting security issues is particularly relevant here, not just boilerplate.
+- `SECURITY.md`: given this app processes untrusted PDF files and has a real attack surface, a documented process for reporting security issues is particularly relevant here, not just boilerplate.
 
 **Implementation steps**
 
@@ -1199,7 +1139,6 @@ Grouped by suggested timeframe. Items within a group are roughly ordered by leve
 | [DOC-1](#doc-1-no-readme-or-contributor-facing-documentation) | Add a `README.md` with setup/build/run/known-limitations |
 | [TEST-3](#test-3-no-continuous-integration-configured) | Stand up a basic CI workflow (install, `tsc --noEmit`, `npm audit`) |
 | [TEST-1](#test-1-zero-unit-test-coverage-for-the-riskiest-code-in-the-repository) | Add a test framework and unit-test the PDF content-stream tokenizer |
-| [SEC-2](#sec-2-renderer-sandbox-explicitly-disabled-while-processing-untrusted-pdfs) | Re-enable the Electron renderer sandbox (`sandbox: true`) |
 
 ### Short-term (this month)
 
@@ -1237,7 +1176,7 @@ Grouped by suggested timeframe. Items within a group are roughly ordered by leve
 
 ## 8. Assumptions
 
-- **Threat model.** This report assumes the application's core purpose — opening and editing PDF files supplied by the end user — includes files from **untrusted or semi-trusted sources** (downloads, email attachments, etc.), not exclusively files the user authored themselves. This assumption directly drives the severity assigned to [SEC-2](#sec-2-renderer-sandbox-explicitly-disabled-while-processing-untrusted-pdfs). If the intended use is strictly self-authored/fully-trusted PDFs in a closed environment, that finding should be downgraded in relative priority (though still worth fixing as defense-in-depth).
+- **Threat model.** This report assumes the application's core purpose — opening and editing PDF files supplied by the end user — includes files from **untrusted or semi-trusted sources** (downloads, email attachments, etc.), not exclusively files the user authored themselves. This assumption directly drives the severity assigned to the sandbox-related finding (now resolved). If the intended use is strictly self-authored/fully-trusted PDFs in a closed environment, that finding should be downgraded in relative priority (though still worth fixing as defense-in-depth).
 - **Development environment.** Findings assume a Linux/CI-style environment consistent with the one used to run this analysis (Node 22, npm 10). Behavior on Windows/macOS build environments was not independently verified, particularly around the Electron packaging and `pdftotext`/Poppler dependency in [TEST-2](#test-2-existing-verify-scripts-are-manual-environment-dependent-smoke-tests).
 - **`vendor/pdf.js` submodule contents.** The submodule was not checked out in the provided archive (expected for a distribution snapshot), so this report evaluates PDF.js **integration code only**, not PDF.js's own internals — those are explicitly out of scope per `AGENTS.md`'s "Zero Submodule Modifications" constraint, and are assumed to be audited/maintained upstream by the Mozilla PDF.js project rather than this repository.
 - **`git log` history is complete and accurate** as provided in the archive (5 commits, each attributed to a different named AI agent/model via a single git author identity). This report treats that history as informative context (e.g., explaining the architecture drift in [ARCH-1](#arch-1-a-third-of-src-is-dead-code-the-specced-architecture-was-abandoned)) rather than as a finding in itself — no judgment is made about the acceptability of AI-agent-authored commits as a development practice.

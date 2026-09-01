@@ -4,7 +4,6 @@ const path = require('path');
 const { registerViewerScheme, registerViewerProtocol } = require('../dist/main/protocol');
 
 app.commandLine.appendSwitch('enable-features', 'BlinkExtension');
-app.commandLine.appendSwitch('no-sandbox');
 app.commandLine.appendSwitch('disable-gpu');
 
 registerViewerScheme();
@@ -23,7 +22,7 @@ async function runTest() {
       preload: path.join(__dirname, '../dist/preload/viewer-preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   });
 

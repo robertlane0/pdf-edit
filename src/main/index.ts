@@ -38,7 +38,7 @@ async function createWindow() {
       preload: path.join(__dirname, '../preload/viewer-preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   });
 
