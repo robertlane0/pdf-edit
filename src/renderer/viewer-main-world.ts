@@ -784,8 +784,50 @@
     });
   }
 
-  document.addEventListener('webviewerloaded', initAppIntegration, { once: true });
-  window.addEventListener('webviewerloaded', initAppIntegration, { once: true });
+  // Handle both early (before webviewerloaded) and late (after webviewerloaded) injection.
+  // The script is now injected via protocol's HTML rewrite (no eval), so it loads before viewer.mjs
+  // in the normal case. The fallback below restores text-editing if injection is late
+  // (e.g., due to caching or async load) without requiring webFrame.executeJavaScript.
+  let integrationInstalled = false;
+  const tryInit = () => {
+    if (integrationInstalled) return;
+    const maybeApp = (window as unknown as Record<string, unknown>).PDFViewerApplication as unknown as {
+      initializedPromise?: Promise<void>;
+    } | undefined;
+    // If the app is already available, run integration immediately; otherwise wait for the event.
+    if (maybeApp && maybeApp.initializedPromise) {
+      integrationInstalled = true;
+      initAppIntegration();
+      return;
+    }
+    // If webviewerloaded has not yet fired, the event listeners below will catch it.
+  };
+
+  document.addEventListener('webviewerloaded', () => { integrationInstalled = true; initAppIntegration(); }, { once: true });
+  window.addEventListener('webviewerloaded', () => { integrationInstalled = true; initAppIntegration(); }, { once: true });
+
+  // Immediate check for late injection (script loaded after webviewerloaded)
+  tryInit();
+  // Also poll briefly in case PDFViewerApplication appears asynchronously after this script
+  if (!integrationInstalled) {
+    let attempts = 0;
+    const interval = setInterval(() => {
+      attempts++;
+      const maybeApp = (window as unknown as Record<string, unknown>).PDFViewerApplication as unknown as {
+        initializedPromise?: Promise<void>;
+      } | undefined;
+      if (maybeApp && maybeApp.initializedPromise) {
+        clearInterval(interval);
+        tryInit();
+      } else if (attempts > 50) {
+        clearInterval(interval);
+      }
+    }, 100);
+    // Safety net for document already loaded
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+      setTimeout(tryInit, 500);
+    }
+  }
 
   // Expose __PDF_ADAPTER__ on the main world window (for chrome-pdf-editor polyfill)
   (

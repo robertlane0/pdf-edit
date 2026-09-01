@@ -195,6 +195,34 @@ export function rewriteViewerCsp(htmlContent: string): { content: string; didRew
 }
 
 /**
+ * Injects the main-world integration script into viewer.html.
+ * This restores text-editing / overlay functionality without using eval
+ * (SEC-6 fix). The script is served as a same-origin resource via
+ * `app-viewer://web/renderer/viewer-main-world.js` so CSP `script-src 'self'`
+ * allows it. Idempotent – if already present, returns unchanged.
+ */
+export function injectViewerMainWorldScript(htmlContent: string): string {
+  if (htmlContent.includes('viewer-main-world.js')) {
+    return htmlContent;
+  }
+  const scriptTag = '<script src="renderer/viewer-main-world.js"></script>';
+  // Inject at the start of <head> so it executes before PDF.js module scripts
+  // (classic scripts block parsing, modules are deferred – this ensures webviewerloaded
+  // listeners are registered before the event fires).
+  if (htmlContent.includes('<head>')) {
+    return htmlContent.replace('<head>', `<head>\n  ${scriptTag}`);
+  }
+  if (htmlContent.includes('</head>')) {
+    return htmlContent.replace('</head>', `  ${scriptTag}\n  </head>`);
+  }
+  // Fallback: prepend to <body> if no head
+  if (htmlContent.includes('<body')) {
+    return htmlContent.replace('<body', `${scriptTag}\n<body`);
+  }
+  return htmlContent;
+}
+
+/**
  * Must be called AFTER app.ready.
  * Handles app-viewer:// requests by serving files from dist/pdfjs/.
  *
@@ -224,7 +252,8 @@ export function registerViewerProtocol(ses?: Electron.Session) {
       }
     }
 
-    // For viewer.html, ensure style-src permits inline styles needed by PDF.js text layer & overlay.
+    // For viewer.html, ensure style-src permits inline styles needed by PDF.js text layer & overlay
+    // and inject the main-world integration script that restores text-editing without eval (SEC-6).
     // Scoped strictly to web/viewer.html to avoid weakening CSP for other HTML files.
     // The rewrite is extracted via rewriteViewerCsp() for testability (see SEC-4).
     if (safePath.replace(/\\/g, '/').endsWith('web/viewer.html')) {
@@ -237,7 +266,8 @@ export function registerViewerProtocol(ses?: Electron.Session) {
               'CSP may not have been relaxed as intended. Check PDF.js CSP format.'
           );
         }
-        return new Response(rewritten, {
+        const withScript = injectViewerMainWorldScript(rewritten);
+        return new Response(withScript, {
           headers: {
             'Content-Type': 'text/html; charset=utf-8'
           }
