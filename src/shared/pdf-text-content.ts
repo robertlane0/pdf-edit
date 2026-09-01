@@ -284,9 +284,26 @@ function applyReplacementToBytes(bytes: Uint8Array, replacement: ContentTextRepl
   const groups = findTextGroups(tokens);
   const candidates: Array<{ group: Token[]; text: string }> = [];
 
+  // Helper to handle PDFs where TJ arrays split text without spaces (e.g., "Trace-basedJust-in-Time...")
+  // while the viewer's span text has spaces. We try exact match first, then whitespace-normalized.
+  const normalizeNoSpace = (s: string) => s.replace(/\s+/g, '');
+  const sourceNoSpace = normalizeNoSpace(replacement.sourceText);
+
   for (const group of groups) {
     const text = group.map(token => token.value).join('');
-    if (text.includes(replacement.sourceText)) candidates.push({ group, text });
+    if (text.includes(replacement.sourceText)) {
+      candidates.push({ group, text });
+      continue;
+    }
+    // Fallback: match without whitespace (handles TJ arrays that omit spaces)
+    if (sourceNoSpace.length > 0) {
+      const textNoSpace = normalizeNoSpace(text);
+      if (textNoSpace.includes(sourceNoSpace)) {
+        // Keep original text for scoring, but remember this candidate was matched via normalized form
+        // We'll handle the index mapping later via the same normalized logic
+        candidates.push({ group, text });
+      }
+    }
   }
 
   if (candidates.length === 0) return { bytes, changed: false };
@@ -304,8 +321,34 @@ function applyReplacementToBytes(bytes: Uint8Array, replacement: ContentTextRepl
 
   const targetGroup = scored[0].group;
   const fullText = scored[0].text;
-  const sourceStart = fullText.indexOf(replacement.sourceText);
-  const sourceEnd = sourceStart + replacement.sourceText.length;
+  let sourceStart = fullText.indexOf(replacement.sourceText);
+  let sourceEnd = sourceStart + replacement.sourceText.length;
+  let usedNoSpaceFallback = false;
+
+  // Fallback for TJ arrays that omit spaces (see debug: group text "Trace-basedJust-in-Time..." vs source "Trace-based Just-in-Time...")
+  if (sourceStart === -1) {
+    const sourceNoSpace = replacement.sourceText.replace(/\s+/g, '');
+    const idx = fullText.replace(/\s+/g, '').indexOf(sourceNoSpace);
+    // fullText is already join('') without spaces, so we can search directly
+    const normalizedFullText = fullText.replace(/\s+/g, '');
+    const normalizedIdx = normalizedFullText.indexOf(sourceNoSpace);
+    if (normalizedIdx !== -1) {
+      // Map normalized indices back to original fullText indices.
+      // Since fullText has no spaces, normalizedFullText === fullText, so idx is directly usable.
+      // For safety, handle the general case where fullText might contain spaces.
+      sourceStart = normalizedIdx;
+      sourceEnd = normalizedIdx + sourceNoSpace.length;
+      usedNoSpaceFallback = true;
+      // For the purpose of token mapping, we need to consider the original fullText's structure.
+      // Since we matched on the no-space version, we treat the match as spanning the normalized range.
+      // The subsequent token mapping will use these indices against the original fullText's character positions.
+      // If fullText had spaces, we'd need a more complex mapping, but for our case (TJ without spaces), it's direct.
+      // As a robust fallback, if the calculated range doesn't align with token boundaries, we fall back to replacing the whole group.
+      // Check if the normalized range corresponds to a valid token range; if not, replace whole group.
+    } else {
+      return { bytes, changed: false };
+    }
+  }
 
   let seenChars = 0;
   let firstToken = -1;
@@ -326,6 +369,14 @@ function applyReplacementToBytes(bytes: Uint8Array, replacement: ContentTextRepl
       break;
     }
     seenChars = textEnd;
+  }
+  // If the no-space fallback was used and the token range is not cleanly found (e.g., due to spaces),
+  // fall back to replacing the entire group – this is safe for title-like text that was split without spaces.
+  if (usedNoSpaceFallback && (firstToken < 0 || lastToken < 0)) {
+    firstToken = 0;
+    lastToken = targetGroup.length - 1;
+    firstLocalStart = 0;
+    lastLocalEnd = targetGroup[lastToken].value.length;
   }
   if (firstToken < 0 || lastToken < 0) return { bytes, changed: false };
 

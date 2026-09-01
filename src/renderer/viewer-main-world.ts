@@ -609,8 +609,25 @@
       '#ext-text-edit-export::before { -webkit-mask-image:url(images/toolbarButton-download.svg); mask-image:url(images/toolbarButton-download.svg); }',
       '#viewerContainer.ext-text-editing .textLayer span { cursor:text !important; }',
       '.ext-text-edit-layer textarea { pointer-events:auto; }',
+      '#ext-export-error-toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#d93025; color:#fff; padding:10px 16px; border-radius:4px; font-size:13px; z-index:9999; max-width:80%; box-shadow:0 2px 8px rgba(0,0,0,0.3); }',
     ].join('\n');
     document.head.appendChild(style);
+
+    function showExportError(message: string): void {
+      let toast = document.getElementById('ext-export-error-toast');
+      if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'ext-export-error-toast';
+        toast.setAttribute('role', 'alert');
+        document.body.appendChild(toast);
+      }
+      toast.textContent = message;
+      toast.style.display = 'block';
+      clearTimeout((toast as unknown as Record<string, number>)._hideTimer);
+      (toast as unknown as Record<string, number>)._hideTimer = window.setTimeout(() => {
+        toast!.style.display = 'none';
+      }, 4000) as unknown as number;
+    }
 
     const container = document.createElement('div');
     container.id = 'ext-text-edit-buttons';
@@ -651,6 +668,11 @@
         );
       } catch (error) {
         console.error('Unable to export text edits', error);
+        const message =
+          error instanceof Error && error.message.includes('Unable to locate')
+            ? `Couldn't export: ${error.message} The PDF's font may use a custom encoding. Try editing a smaller portion of the text.`
+            : `Couldn't export: ${error instanceof Error ? error.message : String(error)}`;
+        showExportError(message);
       }
     });
     container.appendChild(exportButton);
