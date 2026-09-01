@@ -7,7 +7,9 @@
     "build:ts": "tsc",
     "build": "npm run build:pdfjs && npm run build:ts",
     "start": "electron .",
-    "verify:text-edit": "npm run build && node scripts/verify-text-edit.js"
+    "verify:text-edit": "npm run build && node scripts/verify-text-edit.js",
+    "lint": "eslint src --ext .ts,.js",
+    "lint:check": "eslint src --ext .ts,.js --max-warnings 0"
   },
   "dependencies": {
     "fs-extra": "^11.2.0",
@@ -16,7 +18,10 @@
   "devDependencies": {
     "@types/fs-extra": "^11.0.4",
     "@types/node": "^20.11.0",
+    "@typescript-eslint/eslint-plugin": "^6.21.0",
+    "@typescript-eslint/parser": "^6.21.0",
     "electron": "^44.1.0",
+    "eslint": "^8.57.0",
     "typescript": "^5.3.3"
   }
 }

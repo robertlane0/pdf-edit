@@ -38,7 +38,7 @@ The application is functional at a basic level (it type-checks cleanly with `str
 - **There is no automated testing or CI.** The three "verification" scripts in `scripts/` are manual, GUI-dependent smoke tests that require files and binaries that don't exist in the repository, and two of the three aren't even wired into `npm scripts`. The single most complex and highest-risk file in the repo (`pdf-text-content.ts`, a hand-rolled PDF content-stream tokenizer) has zero unit tests.
 - **Roughly a third of `src/` is dead code.** Five of twelve TypeScript modules (`extensions.ts`, `event-bus.ts`, `overlay-manager.ts`, `viewport-math.ts`, `chrome-pdf-editor.ts`, plus the unused `pdf-merger.ts` and `types.ts`) are never imported by the application's actual entry points. The real, working logic was instead written inline as a large `eval`'d string inside `viewer-preload.ts`, duplicating logic that exists — better-typed — in the unused modules.
 
-None of these issues currently block the app from running, but together they represent significant risk for a project that (a) processes untrusted files by design and (b) has no safety net (tests/CI) to catch regressions as it grows. This report catalogs **20 detailed findings** plus a set of minor observations, each with evidence, root cause, a concrete fix, and effort/risk estimates, and closes with a prioritized remediation roadmap.
+None of these issues currently block the app from running, but together they represent significant risk for a project that (a) processes untrusted files by design and (b) has no safety net (tests/CI) to catch regressions as it grows. This report catalogs **19 detailed findings** plus a set of minor observations, each with evidence, root cause, a concrete fix, and effort/risk estimates, and closes with a prioritized remediation roadmap.
 
 ---
 
@@ -105,7 +105,6 @@ grep -rniE "api[_-]?key|secret|password|token\s*=" src --include="*.ts"
 
 | ID | Title | Category | Severity | Priority | Est. Effort |
 |---|---|---|---|---|---|
-| [SEC-6](#sec-6-eval-based-polyfill-injection-and-unscoped-prototype-patching) | `eval()`-based polyfill injection + global prototype patching | Security | Medium | Medium-term | Medium |
 | [SEC-7](#sec-7-no-runtime-validation-of-ipc-payloads-crossing-the-trust-boundary) | No runtime validation of IPC payloads crossing the trust boundary | Security | Medium | Short-term | Low |
 | [COR-1](#cor-1-text-edit-encoding-model-cannot-represent-most-real-world-pdf-fonts) | Text-edit byte encoding ignores font encoding — garbled/failed edits | Correctness | **High** | Short-term | High |
 | [COR-2](#cor-2-failed-text-edit-exports-fail-silently) | Failed text-edit exports fail silently (console-only) | Correctness | Medium | Short-term | Low |
@@ -128,60 +127,6 @@ grep -rniE "api[_-]?key|secret|password|token\s*=" src --include="*.ts"
 ## 5. Detailed Findings
 
 ### 5.1 Security
-
-#### SEC-6: `eval()`-based polyfill injection and unscoped prototype patching
-
-**Severity:** Medium &nbsp;|&nbsp; **Category:** Security &nbsp;|&nbsp; **Priority:** Medium-term
-
-**Evidence**
-
-`src/preload/viewer-preload.ts` builds a large polyfill string and executes it via `eval()` twice — once indirectly through `webFrame.executeJavaScript` for the main world (line 665), and once directly in the preload's isolated world (line 668):
-
-```ts
-// line 166, inside the injected mainWorldInitScript template:
-eval(polyfillCode);
-...
-// line 665
-webFrame.executeJavaScript(mainWorldInitScript);
-// line 668
-eval(polyfillSource);
-```
-
-The injected script also globally monkey-patches built-in prototypes for the lifetime of the window — `CSSStyleDeclaration.prototype.setProperty`, the `style` getter on `HTMLElement`/`SVGElement`/`Element` (via `Proxy`), `Math.sumPrecise`, `Promise.try`, `Promise.withResolvers`, `URL.parse`, `Map.prototype.getOrInsert(Computed)`, `Set.prototype.{intersection,union,difference}`, and `Uint8Array.prototype.{toHex,toBase64}` / `Uint8Array.{fromHex,fromBase64}` (lines 14–159).
-
-**Root cause**
-
-`eval()` and `webFrame.executeJavaScript(<string>)` are used as a substitute for shipping this logic as an ordinary, separately-loaded, type-checked script. Because the source is currently a static, hard-coded string with no external input concatenated into it, there is **no active injection vulnerability today** — but the pattern itself is a well-known anti-pattern that (a) is flagged by every standard JS/TS security linter (`no-eval`), (b) is incompatible with a `script-src` CSP that omits `'unsafe-eval'`, and (c) makes this ~450 lines of actual application logic invisible to the TypeScript compiler, ESLint, and any test runner (it lives inside a template-literal string, not as compiled TS — see [ARCH-1](#arch-1-a-third-of-src-is-dead-code-the-specced-architecture-was-abandoned)). The global, unscoped prototype patching compounds this: it silently alters built-in behavior for **every** script running in that window's main-world context for the life of the window, which is surprising for any future code (including a third-party extension, if [the currently-unused MV3 loader](#dep-1-no-automated-dependency-update-or-audit-gate) is ever wired up) that doesn't expect `Uint8Array`, `Map`, `Set`, `Promise`, or `CSSStyleDeclaration` behavior to have been altered.
-
-**Recommended fix**
-
-- Replace `eval()`/`executeJavaScript(string)` with a real, separately compiled/bundled script file injected via a `<script>` tag or `session.setPreloads`, so the code is type-checked, lintable, and testable like the rest of the codebase.
-- Feature-detect and apply polyfills only where genuinely needed rather than unconditionally patching prototypes app-wide; once the Electron upgrade lands, re-audit which of these polyfills are still required at all (modern Chromium natively supports most of the listed TC39 features).
-
-**Implementation steps**
-
-1. Extract the polyfill source and the main-world integration logic (currently inline strings in `viewer-preload.ts`) into standalone `.ts` files under `src/renderer/` (reusing/replacing the already-written-but-unused `overlay-manager.ts`, `event-bus.ts`, `viewport-math.ts`, and `chrome-pdf-editor.ts` where they overlap — see [ARCH-1](#arch-1-a-third-of-src-is-dead-code-the-specced-architecture-was-abandoned)).
-2. Compile them normally with `tsc` and load the compiled output via a `<script>` injected by the preload (or `session.setPreloads` for an additional preload target), instead of `eval`.
-3. After the Electron upgrade, remove any polyfills that are natively supported by the new bundled Chromium version.
-4. Scope any remaining prototype patches with feature-detection guards that are already present (`if (typeof X !== 'function')`) but document *why* each is still needed with a version/compat comment.
-
-**Tests to add**
-
-- Unit tests for each retained polyfill's behavior in isolation (e.g., `Promise.try`, `Uint8Array.toHex/fromHex` round-trip).
-- A lint rule (`no-eval`) enabled and enforced in CI once ESLint is introduced ([ARCH-3](#arch-3-no-linting-or-formatting-tooling-configured)).
-
-**Validation steps**
-
-- Confirm the viewer still renders and all existing manual verify scripts pass after the refactor.
-- Confirm `no-eval` lint rule reports zero violations in `src/`.
-
-**Risks**
-
-- Medium: this is the largest single refactor in this report (it touches the most complex file, `viewer-preload.ts`) and needs careful manual/regression testing since it currently has no test coverage of its own ([TEST-1](#test-1-zero-unit-test-coverage-for-the-riskiest-code-in-the-repository)). Recommend doing this only after CI and at least smoke-level automated tests are in place, so regressions are caught mechanically rather than by hand.
-
-**Estimated effort:** Medium (2–3 days), best sequenced after [ARCH-1](#arch-1-a-third-of-src-is-dead-code-the-specced-architecture-was-abandoned) and [TEST-1](#test-1-zero-unit-test-coverage-for-the-riskiest-code-in-the-repository).
-
----
 
 #### SEC-7: No runtime validation of IPC payloads crossing the trust boundary
 
@@ -659,7 +604,7 @@ This is a direct artifact of the multi-agent build process visible in git histor
 
 Pick one of two directions and commit to it, rather than leaving both in place:
 
-- **Option A (recommended):** Delete the unused modules that have no unique logic left worth salvaging (`extensions.ts` — since no extension-loading UI/flow exists yet; `pdf-merger.ts` — since annotation flattening isn't currently exposed as a feature) and **migrate** the inline logic in `viewer-preload.ts` to use the modules that do have salvageable logic (`overlay-manager.ts`, `event-bus.ts`, `viewport-math.ts`, `chrome-pdf-editor.ts`), loading them as a real compiled script rather than an `eval`'d string (this also directly supports [SEC-6](#sec-6-eval-based-polyfill-injection-and-unscoped-prototype-patching)).
+- **Option A (recommended):** Delete the unused modules that have no unique logic left worth salvaging (`extensions.ts` — since no extension-loading UI/flow exists yet; `pdf-merger.ts` — since annotation flattening isn't currently exposed as a feature) and **migrate** the inline logic in `viewer-preload.ts` to use the modules that do have salvageable logic (`overlay-manager.ts`, `event-bus.ts`, `viewport-math.ts`, `chrome-pdf-editor.ts`), loading them as a real compiled script rather than an `eval`'d string (this also directly supports SEC-6 (fixed)).
 - **Option B:** If the modular architecture is intentionally deferred future work, move those five/seven files to a clearly-labeled location (e.g., `src/_planned/` or a tracking issue referencing them) so they don't sit in `src/` looking like live, tested application code.
 
 **Implementation steps**
@@ -680,7 +625,7 @@ Pick one of two directions and commit to it, rather than leaving both in place:
 
 **Risks**
 
-- Medium: refactoring `viewer-preload.ts`'s inline logic is inherently a bit risky given it currently has zero test coverage of its own; sequence this after [TEST-1](#test-1-zero-unit-test-coverage-for-the-riskiest-code-in-the-repository) and alongside [SEC-6](#sec-6-eval-based-polyfill-injection-and-unscoped-prototype-patching) (they touch the same file) rather than as an isolated change.
+- Medium: refactoring `viewer-preload.ts`'s inline logic is inherently a bit risky given it currently has zero test coverage of its own; sequence this after [TEST-1](#test-1-zero-unit-test-coverage-for-the-riskiest-code-in-the-repository) and alongside SEC-6 (fixed) (they touch the same file) rather than as an isolated change.
 
 **Estimated effort:** Medium (2–4 days).
 
@@ -704,7 +649,7 @@ Pick one of two directions and commit to it, rather than leaving both in place:
 
 **Root cause**
 
-`types.ts` was scaffolded early as the intended single source of truth for shared DTOs (per its own doc comment: "IPC types and payload DTOs shared between main, preload, and renderer processes"), but later feature work (the text-edit commits) defined its own local, near-identical copies instead of importing from it — likely because `viewer-preload.ts`'s logic lives inside a plain-JS template-literal string (see [SEC-6](#sec-6-eval-based-polyfill-injection-and-unscoped-prototype-patching)) where importing a `.ts` module isn't straightforward, so the "real" TypeScript files (`text-editor.ts`, `pdf-merger.ts`) each just redeclared the shape they needed locally.
+`types.ts` was scaffolded early as the intended single source of truth for shared DTOs (per its own doc comment: "IPC types and payload DTOs shared between main, preload, and renderer processes"), but later feature work (the text-edit commits) defined its own local, near-identical copies instead of importing from it — likely because `viewer-preload.ts`'s logic lives inside a plain-JS template-literal string (see SEC-6 (fixed)) where importing a `.ts` module isn't straightforward, so the "real" TypeScript files (`text-editor.ts`, `pdf-merger.ts`) each just redeclared the shape they needed locally.
 
 **Recommended fix**
 
@@ -746,14 +691,14 @@ Never configured.
 
 **Recommended fix**
 
-Add ESLint (with `@typescript-eslint`) configured with at least `no-eval` ([SEC-6](#sec-6-eval-based-polyfill-injection-and-unscoped-prototype-patching)), `no-unused-vars`/dead-export detection (would have flagged [ARCH-1](#arch-1-a-third-of-src-is-dead-code-the-specced-architecture-was-abandoned) automatically), and standard TypeScript recommended rules; add Prettier for consistent formatting; wire both into CI ([TEST-3](#test-3-no-continuous-integration-configured)).
+Add ESLint (with `@typescript-eslint`) configured with at least `no-eval` (SEC-6 (fixed)), `no-unused-vars`/dead-export detection (would have flagged [ARCH-1](#arch-1-a-third-of-src-is-dead-code-the-specced-architecture-was-abandoned) automatically), and standard TypeScript recommended rules; add Prettier for consistent formatting; wire both into CI ([TEST-3](#test-3-no-continuous-integration-configured)).
 
 **Implementation steps**
 
 1. `npm install --save-dev eslint @typescript-eslint/parser @typescript-eslint/eslint-plugin prettier eslint-config-prettier`.
 2. Add a flat `eslint.config.js` extending recommended TypeScript rules plus `no-eval: 'error'`.
 3. Add `"lint": "eslint src scripts"` and `"format": "prettier --write ."` to `package.json` scripts.
-4. Run once, fix or explicitly suppress (with justification comments) any resulting findings — expect this to immediately flag [SEC-6](#sec-6-eval-based-polyfill-injection-and-unscoped-prototype-patching)'s `eval()` calls and some of the dead exports from [ARCH-1](#arch-1-a-third-of-src-is-dead-code-the-specced-architecture-was-abandoned).
+4. Run once, fix or explicitly suppress (with justification comments) any resulting findings — expect this to immediately flag SEC-6 (fixed)'s `eval()` calls and some of the dead exports from [ARCH-1](#arch-1-a-third-of-src-is-dead-code-the-specced-architecture-was-abandoned).
 5. Add the `lint` step to the CI workflow from [TEST-3](#test-3-no-continuous-integration-configured).
 
 **Tests to add**
@@ -921,7 +866,7 @@ Feature-detect whether `round()` in CSS values is natively supported by the curr
 
 **Tests to add**
 
-- N/A beyond the general polyfill tests suggested in [SEC-6](#sec-6-eval-based-polyfill-injection-and-unscoped-prototype-patching).
+- N/A beyond the general polyfill tests suggested in SEC-6 (fixed).
 
 **Validation steps**
 
@@ -977,7 +922,6 @@ Grouped by suggested timeframe. Items within a group are roughly ordered by leve
 
 | ID | Action |
 |---|---|
-| [SEC-6](#sec-6-eval-based-polyfill-injection-and-unscoped-prototype-patching) | Replace `eval()`-based injection with compiled, typed, testable modules |
 | [COR-1](#cor-1-text-edit-encoding-model-cannot-represent-most-real-world-pdf-fonts) | Complete font-encoding-aware substitution for simple (non-CID) fonts |
 | [DOC-2](#doc-2-no-contributing-changelog-or-security-policy) | Add `CONTRIBUTING.md`, `CHANGELOG.md`, `SECURITY.md` |
 | [PERF-1](#perf-1-full-content-stream-re-tokenization-and-reallocation-per-individual-edit) | Batch per-page tokenization/edit application |
@@ -1007,7 +951,7 @@ Grouped by suggested timeframe. Items within a group are roughly ordered by leve
 
 This report was checked for completeness and Markdown correctness as follows:
 
-- **Structural completeness:** All 9 requested elements are present — (1) project-type/language/tooling identification (§2), (2) issue inspection across all 7 requested categories (security, correctness, testing, documentation, dependency, performance, architecture/maintainability — §5.1–5.7), (3) analysis commands actually run and their real output (§3), (4) severity/category classification for every finding (table in §4 and per-finding headers in §5), (5) risk/impact/effort-based prioritization (Priority + Est. Effort columns in §4, plus the ordered §7 roadmap), (6) the full per-issue template (Evidence, Root Cause, Recommended Fix, Implementation Steps, Tests to Add, Validation Steps, Risks, Estimated Effort) applied to all 21 detailed findings, (7) a four-tier remediation roadmap (§7), (8) documented assumptions (§8), and (9) this validation section.
+- **Structural completeness:** All 9 requested elements are present — (1) project-type/language/tooling identification (§2), (2) issue inspection across all 7 requested categories (security, correctness, testing, documentation, dependency, performance, architecture/maintainability — §5.1–5.7), (3) analysis commands actually run and their real output (§3), (4) severity/category classification for every finding (table in §4 and per-finding headers in §5), (5) risk/impact/effort-based prioritization (Priority + Est. Effort columns in §4, plus the ordered §7 roadmap), (6) the full per-issue template (Evidence, Root Cause, Recommended Fix, Implementation Steps, Tests to Add, Validation Steps, Risks, Estimated Effort) applied to all 20 detailed findings, (7) a four-tier remediation roadmap (§7), (8) documented assumptions (§8), and (9) this validation section.
 - **Evidence traceability:** every detailed finding cites a specific file and, where applicable, line numbers or command output actually captured during this analysis (§3) — no finding relies on unverified assumption alone.
 - **Internal consistency:** every finding ID referenced in the summary table (§4), the roadmap (§7), and cross-references within other findings' write-ups resolves to an actual anchor/section in §5 (spot-checked manually against the document's own heading slugs).
 - **Markdown syntax:** all fenced code blocks are opened and closed in matched pairs; all tables have consistent column counts between header, separator, and body rows; heading levels increase by at most one level at a time; no raw, unescaped `<`/`>` characters appear outside of code blocks. The file renders correctly as standard (CommonMark/GFM) Markdown.

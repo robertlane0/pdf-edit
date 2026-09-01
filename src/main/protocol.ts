@@ -5,6 +5,7 @@ import { pathToFileURL } from 'url';
 import fs from 'fs';
 
 const PDFJS_ROOT = path.normalize(path.join(__dirname, '../../dist/pdfjs'));
+const RENDERER_ROOT = path.normalize(path.join(__dirname, '../../dist/renderer'));
 
 /**
  * Must be called BEFORE app.ready.
@@ -28,16 +29,42 @@ export function registerViewerScheme() {
 }
 
 /**
- * Resolves an app-viewer:// URL to a filesystem path inside dist/pdfjs.
+ * Resolves an app-viewer:// URL to a filesystem path inside dist/pdfjs or dist/renderer.
  * Handles relative path traversal where PDF.js uses '../build/' or '../web/'
- * from 'app-viewer://web/viewer.html'.
+ * from 'app-viewer://web/viewer.html', and serves renderer assets via
+ * `app-viewer://renderer/` or same-origin `app-viewer://web/renderer/` (CSP 'self' compatible).
  */
 export function resolveViewerPath(requestUrl: string): string | null {
   try {
     const url = new URL(requestUrl);
+
+    // Renderer assets: app-viewer://renderer/<file> -> dist/renderer/<file>
+    // Used for injection of compiled main-world scripts without eval (SEC-6 fix).
+    if (url.hostname === 'renderer') {
+      const relativePath = decodeURIComponent(url.pathname.startsWith('/') ? url.pathname.slice(1) : url.pathname);
+      const safePath = path.normalize(path.join(RENDERER_ROOT, relativePath));
+      const normalizedRoot = RENDERER_ROOT.endsWith(path.sep) ? RENDERER_ROOT : RENDERER_ROOT + path.sep;
+      if (safePath !== RENDERER_ROOT && !safePath.startsWith(normalizedRoot)) {
+        return null;
+      }
+      return safePath;
+    }
+
     let relativePath: string;
 
     if (url.hostname === 'web') {
+      // Same-origin renderer asset: app-viewer://web/renderer/<file> -> dist/renderer/<file>
+      // This is the preferred CSP-compatible path since 'self' matches web origin (SEC-6).
+      if (url.pathname.startsWith('/renderer/')) {
+        const rendererRelative = decodeURIComponent(url.pathname.slice('/renderer/'.length));
+        const safePath = path.normalize(path.join(RENDERER_ROOT, rendererRelative));
+        const normalizedRoot = RENDERER_ROOT.endsWith(path.sep) ? RENDERER_ROOT : RENDERER_ROOT + path.sep;
+        if (safePath !== RENDERER_ROOT && !safePath.startsWith(normalizedRoot)) {
+          return null;
+        }
+        return safePath;
+      }
+
       if (url.pathname.startsWith('/build/')) {
         // e.g. app-viewer://web/build/pdf.mjs -> build/pdf.mjs
         relativePath = url.pathname.slice(1);
