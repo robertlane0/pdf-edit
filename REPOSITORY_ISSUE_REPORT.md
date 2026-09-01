@@ -60,7 +60,7 @@ None of these issues currently block the app from running, but together they rep
 | **License** | Apache License 2.0 (`LICENSE`); compatible with all first-party dependencies observed (`pdf-lib` MIT, `fs-extra` MIT, PDF.js Apache-2.0) |
 | **Packaging / distribution** | None. No `electron-builder`, `electron-forge`, or Squirrel configuration; the app can only be run via `npm start` in a development checkout. |
 | **Repo size** | 12 TypeScript files under `src/` (~1,800 LOC total), 4 scripts (~270 LOC), no `node_modules` committed (correctly `.gitignore`d) |
-| **VCS state** | Git repo with 5 commits on `main`, tracking `origin/main`. One **untracked** file, `patch.diff` (22 KB), is present in the working tree (see [ARCH-4](#arch-4-stray-already-applied-patchdiff-committed-into-the-working-tree)). The `vendor/pdf.js` submodule is registered (`.gitmodules`) but **not checked out** in this snapshot (empty directory) — expected for a distribution archive, but the build script does not detect or explain this condition (see [ARCH-6](#6-additional--lower-priority-observations)). |
+| **VCS state** | Git repo with 18 commits on `main`, tracking `origin/main`. The `vendor/pdf.js` submodule is registered (`.gitmodules`) but **not checked out** in this snapshot (empty directory) — expected for a distribution archive, but the build script does not detect or explain this condition (see [ARCH-6](#6-additional--lower-priority-observations)). |
 
 ---
 
@@ -87,7 +87,6 @@ npm view electron version            # latest published version for comparison
 git log --oneline
 git submodule status
 git status
-diff <(git show 89e9e74) patch.diff  # confirms patch.diff is a stale duplicate of the last commit
 
 # Targeted pattern scans
 grep -rn "eval(" src --include="*.ts"
@@ -115,7 +114,6 @@ grep -rniE "api[_-]?key|secret|password|token\s*=" src --include="*.ts"
 | [ARCH-1](#arch-1-a-third-of-src-is-dead-code-the-specced-architecture-was-abandoned) | ~35% of `src/` is dead code; specced architecture abandoned | Architecture | **High** | Short-term | Medium |
 | [ARCH-2](#arch-2-duplicate-independently-maintained-type-definitions) | Duplicate, independently-maintained type definitions | Maintainability | Medium | Short-term | Low |
 | [ARCH-3](#arch-3-no-linting-or-formatting-tooling-configured) | No linting or formatting tooling configured | Maintainability | Medium | Short-term | Low |
-| [ARCH-4](#arch-4-stray-already-applied-patchdiff-committed-into-the-working-tree) | Stray, already-applied `patch.diff` left in the working tree | Maintainability | Low | Immediate | Trivial |
 | [ARCH-5](#arch-5-no-production-packaging-or-distribution-pipeline) | No production packaging/distribution pipeline | Architecture | Low–Medium | Long-term | Medium |
 | [PERF-1](#perf-1-full-content-stream-re-tokenization-and-reallocation-per-individual-edit) | Full content-stream re-tokenization/reallocation per edit | Performance | Low–Medium | Medium-term | Medium |
 | [PERF-2](#perf-2-unconditional-global-proxy-wrapping-of-cssstyledeclaration) | Unconditional global `Proxy` wrapping of `CSSStyleDeclaration` | Performance | Low | Long-term | Low |
@@ -600,43 +598,6 @@ Add ESLint (with `@typescript-eslint`) configured with at least `no-eval` (SEC-6
 
 ---
 
-#### ARCH-4: Stray, already-applied `patch.diff` committed into the working tree
-
-**Severity:** Low &nbsp;|&nbsp; **Category:** Maintainability (repo hygiene) &nbsp;|&nbsp; **Priority:** Immediate (trivial to fix)
-
-**Evidence**
-
-`patch.diff` (22 KB, 622 lines) is present in the repository as an **untracked** file (`git status` lists it under "Untracked files"). Comparing it directly against `git show 89e9e74` (the current `HEAD` commit) shows it is **byte-for-byte the same diff content as the most recent commit** — it appears to be a leftover export of that commit's patch (e.g., from `git show > patch.diff` or similar), left behind in the working tree rather than cleaned up.
-
-**Root cause**
-
-Process artifact from the AI-agent-driven commit workflow; not cleaned up after use.
-
-**Recommended fix**
-
-Delete the file; if patch files are a recurring output of this project's workflow, add `*.diff`/`*.patch` to `.gitignore` to prevent this recurring.
-
-**Implementation steps**
-
-1. `git clean` or manually `rm patch.diff`.
-2. Optionally add `*.diff` and `*.patch` to `.gitignore`.
-
-**Tests to add**
-
-- N/A.
-
-**Validation steps**
-
-- `git status` shows a clean working tree.
-
-**Risks**
-
-- None.
-
-**Estimated effort:** Trivial (minutes).
-
----
-
 #### ARCH-5: No production packaging or distribution pipeline
 
 **Severity:** Low–Medium &nbsp;|&nbsp; **Category:** Architecture &nbsp;|&nbsp; **Priority:** Long-term
@@ -783,7 +744,6 @@ Grouped by suggested timeframe. Items within a group are roughly ordered by leve
 
 | ID | Action |
 |---|---|
-| [ARCH-4](#arch-4-stray-already-applied-patchdiff-committed-into-the-working-tree) | Delete stray `patch.diff`; add `*.diff`/`*.patch` to `.gitignore` |
 | [DOC-1](#doc-1-no-readme-or-contributor-facing-documentation) | Add a `README.md` with setup/build/run/known-limitations |
 | [TEST-3](#test-3-no-continuous-integration-configured) | Stand up a basic CI workflow (install, `tsc --noEmit`, `npm audit`) |
 | [TEST-1](#test-1-zero-unit-test-coverage-for-the-riskiest-code-in-the-repository) | Add a test framework and unit-test the PDF content-stream tokenizer |
@@ -835,3 +795,4 @@ This report was checked for completeness and Markdown correctness as follows:
 - **Evidence traceability:** every detailed finding cites a specific file and, where applicable, line numbers or command output actually captured during this analysis (§3) — no finding relies on unverified assumption alone.
 - **Internal consistency:** every finding ID referenced in the summary table (§4), the roadmap (§7), and cross-references within other findings' write-ups resolves to an actual anchor/section in §5 (spot-checked manually against the document's own heading slugs).
 - **Markdown syntax:** all fenced code blocks are opened and closed in matched pairs; all tables have consistent column counts between header, separator, and body rows; heading levels increase by at most one level at a time; no raw, unescaped `<`/`>` characters appear outside of code blocks. The file renders correctly as standard (CommonMark/GFM) Markdown.
+
