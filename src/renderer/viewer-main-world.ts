@@ -610,7 +610,7 @@
     style.textContent = [
       '#ext-text-edit-mode::before { -webkit-mask-image:url(images/editor-toolbar-edit.svg); mask-image:url(images/editor-toolbar-edit.svg); }',
       '#ext-text-edit-export::before { -webkit-mask-image:url(images/toolbarButton-download.svg); mask-image:url(images/toolbarButton-download.svg); }',
-      '#ext-fallback-font-toggle::before { -webkit-mask-image:url(images/secondaryToolbarButton-selectTool.svg); mask-image:url(images/secondaryToolbarButton-selectTool.svg); }',
+      '#ext-fallback-font-toggle::before { -webkit-mask-image:url(images/toolbarButton-editorFreeText.svg); mask-image:url(images/toolbarButton-editorFreeText.svg); }',
       '#viewerContainer.ext-text-editing .textLayer span { cursor:text !important; }',
       '.ext-text-edit-layer textarea { pointer-events:auto; }',
       '#ext-export-error-toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#d93025; color:#fff; padding:10px 16px; border-radius:4px; font-size:13px; z-index:9999; max-width:80%; box-shadow:0 2px 8px rgba(0,0,0,0.3); }',
