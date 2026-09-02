@@ -1,7 +1,7 @@
 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-<!-- Fallback font icon: large A with small fallback indicator -->
-<path d="M2.5 13.5L6.5 3.5H9.5L13.5 13.5H11.7L10.4 10H5.6L4.3 13.5H2.5Z" fill="black"/>
-<path d="M6.1 8H9.9" stroke="black" stroke-width="1.1" stroke-linecap="round"/>
-<!-- Small arrow/refresh indicator at bottom right for fallback -->
-<path d="M10.8 11.8C11.6 12.6 13.2 12.9 14.2 11.9L13.5 11.2L14.8 10.5L15.5 12L14 12.7L13.3 12C12.5 12.6 11.3 12.4 10.8 11.8Z" fill="black"/>
+<!-- Fallback font: clean A with circular fallback arrow -->
+<path d="M8 2.6L2.9 13.4H4.7L5.9 10.6H10.1L11.3 13.4H13.1L8 2.6ZM6.7 8.6H9.3L8 5.1L6.7 8.6Z" fill="black" fill-rule="evenodd"/>
+<!-- Small circular fallback arrow at bottom right -->
+<path d="M11.2 11.2C11.9 10.5 13.1 10.4 13.9 11.2L13.2 11.9C12.7 11.4 11.8 11.5 11.2 11.9C10.6 12.5 10.7 13.4 11.2 13.9L10.5 14.6C9.5 13.6 9.4 12 10.5 11.2L11.2 11.9L11.2 11.2Z" fill="black"/>
+<path d="M13.2 10.4L14.7 11L13.9 12.5L13.2 11.9L13.7 11.4L13.2 10.4Z" fill="black"/>
 </svg>
