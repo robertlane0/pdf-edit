@@ -610,6 +610,7 @@
     style.textContent = [
       '#ext-text-edit-mode::before { -webkit-mask-image:url(images/editor-toolbar-edit.svg); mask-image:url(images/editor-toolbar-edit.svg); }',
       '#ext-text-edit-export::before { -webkit-mask-image:url(images/toolbarButton-download.svg); mask-image:url(images/toolbarButton-download.svg); }',
+      '#ext-fallback-font-toggle::before { -webkit-mask-image:url(images/secondaryToolbarButton-selectTool.svg); mask-image:url(images/secondaryToolbarButton-selectTool.svg); }',
       '#viewerContainer.ext-text-editing .textLayer span { cursor:text !important; }',
       '.ext-text-edit-layer textarea { pointer-events:auto; }',
       '#ext-export-error-toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#d93025; color:#fff; padding:10px 16px; border-radius:4px; font-size:13px; z-index:9999; max-width:80%; box-shadow:0 2px 8px rgba(0,0,0,0.3); }',
@@ -664,26 +665,18 @@
     container.appendChild(modeButton);
 
     const exportButton = createButton('ext-text-edit-export', 'Export PDF with text edits');
-    // Fallback Font Rendering checkbox (unchecked by default)
-    // When unchecked, edits requiring missing glyphs throw (current behavior).
-    // When checked, those edits are rendered via LiberationSans fallback (white cover + drawText).
-    const fallbackWrapper = document.createElement('label');
-    fallbackWrapper.id = 'ext-fallback-font-wrapper';
-    fallbackWrapper.title = 'When checked, text edits that need glyphs missing from the original font will be rendered with Liberation Sans (subset) instead of throwing. Handles spaces and subset fonts like NimbusRomNo9L.';
-    fallbackWrapper.style.cssText = 'display:inline-flex; align-items:center; gap:4px; margin-left:8px; font-size:12px; color:var(--toolbar-color, #333); cursor:pointer; user-select:none;';
-    const fallbackCheckbox = document.createElement('input');
-    fallbackCheckbox.type = 'checkbox';
-    fallbackCheckbox.id = 'ext-fallback-font-toggle';
-    fallbackCheckbox.checked = false;
-    fallbackCheckbox.style.cssText = 'margin:0;';
-    const fallbackLabel = document.createElement('span');
-    fallbackLabel.textContent = 'Fallback Font Rendering';
-    fallbackLabel.style.cssText = 'white-space:nowrap;';
-    fallbackWrapper.appendChild(fallbackCheckbox);
-    fallbackWrapper.appendChild(fallbackLabel);
+    const fallbackButton = createButton('ext-fallback-font-toggle', 'Fallback Font Rendering');
+    // Unchecked by default (no toggled class, aria-pressed false) – matches prior checkbox unchecked behavior
+    fallbackButton.setAttribute('aria-pressed', 'false');
+    fallbackButton.addEventListener('click', () => {
+      const isPressed = fallbackButton.getAttribute('aria-pressed') === 'true';
+      const newState = !isPressed;
+      fallbackButton.classList.toggle('toggled', newState);
+      fallbackButton.setAttribute('aria-pressed', String(newState));
+    });
 
     exportButton.addEventListener('click', async () => {
-      const useFallback = (document.getElementById('ext-fallback-font-toggle') as HTMLInputElement | null)?.checked ?? false;
+      const useFallback = fallbackButton.getAttribute('aria-pressed') === 'true';
       try {
         await exportTextEdits(
           App as unknown as { pdfDocument: { getData: () => Promise<Uint8Array> } },
@@ -691,15 +684,24 @@
         );
       } catch (error) {
         console.error('Unable to export text edits', error);
-        const message =
-          error instanceof Error && error.message.includes('Unable to locate')
-            ? `Couldn't export: ${error.message} The PDF's font may use a custom encoding. Try editing a smaller portion of the text.`
-            : `Couldn't export: ${error instanceof Error ? error.message : String(error)}`;
+        let message: string;
+        if (error instanceof Error && error.message.includes('Unable to locate')) {
+          message = `Couldn't export: ${error.message} The PDF's font may use a custom encoding. Try editing a smaller portion of the text.`;
+        } else if (
+          error instanceof Error &&
+          (error.message.includes('not encoded in font') ||
+            error.message.includes('composite font') ||
+            error.message.includes('Cannot encode'))
+        ) {
+          message = `Couldn't export: ${error.message} Try enabling 'Fallback Font Rendering' in the toolbar to render with a substituted font.`;
+        } else {
+          message = `Couldn't export: ${error instanceof Error ? error.message : String(error)}`;
+        }
         showExportError(message);
       }
     });
     container.appendChild(exportButton);
-    container.appendChild(fallbackWrapper);
+    container.appendChild(fallbackButton);
     separator.parentElement.insertBefore(container, separator);
 
     document.addEventListener(
