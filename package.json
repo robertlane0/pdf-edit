@@ -5,7 +5,7 @@
   "scripts": {
     "build:pdfjs": "node scripts/build-pdfjs.js",
     "build:ts": "tsc",
-    "build:assets": "mkdir -p dist/assets/fonts && cp src/assets/fonts/LiberationSans-Regular.ttf dist/assets/fonts/ 2>/dev/null || node -e \"require('fs-extra').copySync('src/assets/fonts/LiberationSans-Regular.ttf','dist/assets/fonts/LiberationSans-Regular.ttf')\"",
+    "build:assets": "node scripts/copy-assets.js",
     "build": "npm run build:pdfjs && npm run build:ts && npm run build:assets",
     "start": "electron .",
     "verify:text-edit": "npm run build && node scripts/verify-text-edit.js",
