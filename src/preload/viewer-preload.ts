@@ -11,8 +11,8 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 // Expose IPC bridge for text editing (used by the main-world script via window.__PDF_TEXT_EDITOR_IPC__)
 contextBridge.exposeInMainWorld('__PDF_TEXT_EDITOR_IPC__', {
-  apply: (originalPdfBytes: Uint8Array, edits: unknown[]) =>
-    ipcRenderer.invoke('pdf:apply-text-edits', originalPdfBytes, edits),
+  apply: (originalPdfBytes: Uint8Array, edits: unknown[], useFallbackFont?: boolean) =>
+    ipcRenderer.invoke('pdf:apply-text-edits', originalPdfBytes, edits, useFallbackFont),
 });
 
 // Isolated-world polyfills (inlined to avoid require() in sandboxed preload).

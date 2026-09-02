@@ -572,14 +572,17 @@
     });
   }
 
-  async function exportTextEdits(App: {
-    pdfDocument: { getData: () => Promise<Uint8Array> };
-  }): Promise<void> {
+  async function exportTextEdits(
+    App: {
+      pdfDocument: { getData: () => Promise<Uint8Array> };
+    },
+    useFallbackFont?: boolean,
+  ): Promise<void> {
     if (textEditStore.size === 0) return;
     const source = await App.pdfDocument.getData();
     const edited = await (
-      window as unknown as Record<string, { apply: (b: Uint8Array, e: unknown[]) => Promise<Uint8Array> }>
-    ).__PDF_TEXT_EDITOR_IPC__.apply(source, Array.from(textEditStore.values()));
+      window as unknown as Record<string, { apply: (b: Uint8Array, e: unknown[], useFallback?: boolean) => Promise<Uint8Array> }>
+    ).__PDF_TEXT_EDITOR_IPC__.apply(source, Array.from(textEditStore.values()), !!useFallbackFont);
     const blob = new Blob([edited as BlobPart], { type: 'application/pdf' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -661,10 +664,30 @@
     container.appendChild(modeButton);
 
     const exportButton = createButton('ext-text-edit-export', 'Export PDF with text edits');
+    // Fallback Font Rendering checkbox (unchecked by default)
+    // When unchecked, edits requiring missing glyphs throw (current behavior).
+    // When checked, those edits are rendered via LiberationSans fallback (white cover + drawText).
+    const fallbackWrapper = document.createElement('label');
+    fallbackWrapper.id = 'ext-fallback-font-wrapper';
+    fallbackWrapper.title = 'When checked, text edits that need glyphs missing from the original font will be rendered with Liberation Sans (subset) instead of throwing. Handles spaces and subset fonts like NimbusRomNo9L.';
+    fallbackWrapper.style.cssText = 'display:inline-flex; align-items:center; gap:4px; margin-left:8px; font-size:12px; color:var(--toolbar-color, #333); cursor:pointer; user-select:none;';
+    const fallbackCheckbox = document.createElement('input');
+    fallbackCheckbox.type = 'checkbox';
+    fallbackCheckbox.id = 'ext-fallback-font-toggle';
+    fallbackCheckbox.checked = false;
+    fallbackCheckbox.style.cssText = 'margin:0;';
+    const fallbackLabel = document.createElement('span');
+    fallbackLabel.textContent = 'Fallback Font Rendering';
+    fallbackLabel.style.cssText = 'white-space:nowrap;';
+    fallbackWrapper.appendChild(fallbackCheckbox);
+    fallbackWrapper.appendChild(fallbackLabel);
+
     exportButton.addEventListener('click', async () => {
+      const useFallback = (document.getElementById('ext-fallback-font-toggle') as HTMLInputElement | null)?.checked ?? false;
       try {
         await exportTextEdits(
-          App as unknown as { pdfDocument: { getData: () => Promise<Uint8Array> } }
+          App as unknown as { pdfDocument: { getData: () => Promise<Uint8Array> } },
+          useFallback,
         );
       } catch (error) {
         console.error('Unable to export text edits', error);
@@ -676,6 +699,7 @@
       }
     });
     container.appendChild(exportButton);
+    container.appendChild(fallbackWrapper);
     separator.parentElement.insertBefore(container, separator);
 
     document.addEventListener(

@@ -13,7 +13,7 @@ registerViewerScheme();
 
 ipcMain.handle(
   'pdf:apply-text-edits',
-  async (_event, originalPdfBytes: Uint8Array, edits: PDFTextEdit[]): Promise<Uint8Array> => {
+  async (_event, originalPdfBytes: Uint8Array, edits: PDFTextEdit[], useFallbackFont?: boolean): Promise<Uint8Array> => {
     if (!(originalPdfBytes instanceof Uint8Array)) {
       throw new TypeError('Expected source PDF bytes to be a Uint8Array');
     }
@@ -24,7 +24,7 @@ ipcMain.handle(
       throw new TypeError(`Too many text edits: ${edits.length} exceeds maximum of ${MAX_TEXT_EDITS}`);
     }
     assertValidTextEdits(edits);
-    return applyTextEditsToPDF(originalPdfBytes, edits);
+    return applyTextEditsToPDF(originalPdfBytes, edits, { useFallbackFont: !!useFallbackFont });
   }
 );
 

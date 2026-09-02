@@ -60,6 +60,13 @@ export interface PDFTextEdit extends PDFRect {
   pageIndex: number;
   sourceText: string;
   text: string;
+  fontSize?: number;
+  color?: NormalizedColor;
+  // The following are captured from the DOM for fallback rendering but not required for validation
+  fontFamily?: string;
+  fontWeight?: string;
+  fontStyle?: string;
+  fontCssStyle?: string;
 }
 
 /** Maximum number of text edits allowed per IPC call to bound processing time. */
