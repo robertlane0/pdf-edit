@@ -929,6 +929,67 @@ function isCompositeFont(fontDict: PDFDict | undefined, pdfDocument: PDFDocument
   return subtype === 'Type0' || subtype === 'CIDFontType0' || subtype === 'CIDFontType2';
 }
 
+function isByteAvailableInFont(fontDict: PDFDict | undefined, pdfDocument: PDFDocument, byte: number): boolean {
+  if (!fontDict) return true;
+  // Check FirstChar / LastChar / Widths for Type1 fonts (common for subsetted fonts like in edited7.pdf)
+  // If the byte is outside the defined range or has width 0, the glyph is missing from the subset
+  const firstCharObj = fontDict.get(PDFName.of('FirstChar'));
+  const lastCharObj = fontDict.get(PDFName.of('LastChar'));
+  if (firstCharObj && lastCharObj) {
+    let first = 0;
+    let last = 255;
+    try {
+      const f = firstCharObj as any;
+      first = f.asNumber?.() ?? f.value?.() ?? Number(f.toString());
+      const l = lastCharObj as any;
+      last = l.asNumber?.() ?? l.value?.() ?? Number(l.toString());
+    } catch {
+      // If we can't parse, assume available
+      return true;
+    }
+    if (byte < first || byte > last) return false;
+    const widthsObj = fontDict.get(PDFName.of('Widths'));
+    if (widthsObj) {
+      const widths = safeLookup(pdfDocument, widthsObj, PDFArray) as PDFArray | undefined;
+      // Also try direct instance if not found via safeLookup (for direct arrays)
+      const widthsArray: PDFArray | undefined = widths ?? (widthsObj instanceof PDFArray ? (widthsObj as PDFArray) : undefined);
+      if (widthsArray) {
+        const idx = byte - first;
+        if (idx < 0 || idx >= widthsArray.size()) return false;
+        const wObj = widthsArray.get(idx);
+        let w = 0;
+        try {
+          const wo = wObj as any;
+          w = wo.asNumber?.() ?? wo.value?.() ?? Number(wo.toString());
+        } catch {
+          w = Number(wObj.toString());
+        }
+        if (!Number.isFinite(w) || w === 0) return false;
+      }
+    }
+  }
+  // Also check CharSet in FontDescriptor if present (subset indicator)
+  // This is a secondary check; if Widths already filtered, this is extra
+  try {
+    const descriptorRef = fontDict.get(PDFName.of('FontDescriptor'));
+    if (descriptorRef) {
+      const descriptor = safeLookup(pdfDocument, descriptorRef, PDFDict) as PDFDict | undefined;
+      if (descriptor) {
+        const charSetObj = descriptor.get(PDFName.of('CharSet'));
+        if (charSetObj) {
+          // CharSet is like "(/A/B/C...)" - check if we can find glyph name for this byte?
+          // We don't have glyph name here, so we skip detailed check and rely on Widths
+          // But we can at least ensure that if CharSet exists, the byte's glyph is not .notdef
+          // For now, rely on Widths check which is sufficient for the reported bug (0-width glyphs)
+        }
+      }
+    }
+  } catch {
+    // Ignore CharSet errors, fall back to Widths check
+  }
+  return true;
+}
+
 /**
  * Builds a unicode (codePoint) -> byte map for a simple font.
  * Returns null if font is composite (caller should handle rejection separately)
@@ -996,7 +1057,17 @@ function buildUnicodeToByteMap(
     else baseEncodingName = 'WinAnsiEncoding';
   }
 
-  return buildMapFromBaseEncoding(baseEncodingName, differences, pdfDocument);
+  const map = buildMapFromBaseEncoding(baseEncodingName, differences, pdfDocument);
+  // Filter out bytes that are not available in this font's subset (0-width or outside FirstChar..LastChar)
+  // This handles subsetted Type1 fonts like NimbusRomNo9L in edited7.pdf where U/Y/H and space have 0-width
+  if (fontDict) {
+    for (const [unicode, byte] of [...map.entries()]) {
+      if (!isByteAvailableInFont(fontDict, pdfDocument, byte)) {
+        map.delete(unicode);
+      }
+    }
+  }
+  return map;
 }
 
 function buildMapFromBaseEncoding(
